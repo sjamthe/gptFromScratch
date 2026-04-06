@@ -81,6 +81,10 @@ class GPT(nn.Module):
         })
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
         
+        # weight tying scheme: 
+        # https://paperswithcode.com/method/weight-tying
+        self.transformer.wte.weight = self.lm_head.weight
+        
     def forward(self, idx: torch.Tensor, targets: torch.Tensor = None) -> tuple[torch.Tensor, torch.Tensor]:
         B, T = idx.size()
         assert T <= self.config.block_size, f"Cannot forward sequence of length {T}, block size is {self.config.block_size}"
@@ -129,6 +133,7 @@ class GPT(nn.Module):
 
         # copy while ensuring all of the parameters are aligned and match in names and shapes
         sd_keys_hf = sd_hf.keys()
+        # NOTE: The below 3 filters resulted to no reduction in the number of keys
         sd_keys_hf = [k for k in sd_keys_hf if not k.endswith('.attn.masked_bias')] # ignore these, just a buffer
         sd_keys_hf = [k for k in sd_keys_hf if not k.endswith('.attn.bias')] # same, just the mask (buffer)
         transposed = ['attn.c_attn.weight', 'attn.c_proj.weight', 'mlp.c_fc.weight', 'mlp.c_proj.weight']
@@ -151,99 +156,102 @@ class GPT(nn.Module):
 
 
 #Test run by pre-loading weights
+def test_pretrained_model():
+    max_length=30
+    num_return_sequences=5
+    device = 'cuda' if torch.cuda.is_available() else 'mps' if torch.backends.mps.is_available() else 'cpu'
+    print(f"Using device: {device}")
 
-max_length=30
-num_return_sequences=5
-device = 'cuda' if torch.cuda.is_available() else 'mps' if torch.backends.mps.is_available() else 'cpu'
-print(f"Using device: {device}")
+    # get input data ready
+    import tiktoken
+    enc = tiktoken.get_encoding("gpt2")
+    tokens = enc.encode("Hello, I am a language model,")
+    tokens = torch.tensor(tokens, dtype=torch.long) # 8,
+    tokens = tokens.unsqueeze(0).repeat(num_return_sequences, 1) # (5, 8)
 
-# get input data ready
-import tiktoken
-enc = tiktoken.get_encoding("gpt2")
-tokens = enc.encode("Hello, I am a language model,")
-tokens = torch.tensor(tokens, dtype=torch.long) # 8,
-tokens = tokens.unsqueeze(0).repeat(num_return_sequences, 1) # (5, 8)
+    print("--- Custom Model Generation ---")
+    torch.manual_seed(42)
+    torch.cuda.manual_seed(42)
 
-print("--- Custom Model Generation ---")
-torch.manual_seed(42)
-torch.cuda.manual_seed(42)
+    #Load the pretrained model
+    model, model_hf = GPT.from_pretrained('gpt2')
+    model.eval()
+    model.to(device)
 
-#Load the pretrained model
-model, model_hf = GPT.from_pretrained('gpt2')
-model.eval()
-model.to(device)
+    # generation parameters
+    temperature = 0.9
+    top_p = 0.9
+    top_k_val = 50
 
-# generation parameters
-temperature = 0.9
-top_p = 0.9
-top_k_val = 50
-
-# Save the original batched input so we can use it twice!
-x_input = tokens.to(device)
-print("--- Custom Model Generation ---")
-torch.manual_seed(42)
-torch.cuda.manual_seed(42)
-# Start x with our input
-x = x_input.clone() 
-# generate the output
-while x.size(1) < max_length:
-    with torch.no_grad():
-        logits, loss = model(x)
-        logits = logits[:, -1, :] # (B, vocab_size)
-        
-        # 1. Apply temperature
-        if temperature > 0.0:
-            logits = logits / temperature
+    # Save the original batched input so we can use it twice!
+    x_input = tokens.to(device)
+    print("--- Custom Model Generation ---")
+    torch.manual_seed(42)
+    torch.cuda.manual_seed(42)
+    # Start x with our input
+    x = x_input.clone() 
+    # generate the output
+    while x.size(1) < max_length:
+        with torch.no_grad():
+            logits, loss = model(x)
+            logits = logits[:, -1, :] # (B, vocab_size)
             
-        # 2. Apply top_k
-        v, _ = torch.topk(logits, min(top_k_val, logits.size(-1)))
-        logits[logits < v[:, [-1]]] = -float('Inf')
-        
-        # 3. Apply top_p (nucleus sampling)
-        if top_p > 0.0 and top_p < 1.0:
-            sorted_logits, sorted_indices = torch.sort(logits, descending=True)
-            cumulative_probs = torch.cumsum(F.softmax(sorted_logits, dim=-1), dim=-1)
+            # 1. Apply temperature
+            if temperature > 0.0:
+                logits = logits / temperature
+                
+            # 2. Apply top_k
+            v, _ = torch.topk(logits, min(top_k_val, logits.size(-1)))
+            logits[logits < v[:, [-1]]] = -float('Inf')
             
-            # Remove tokens with cumulative probability above the threshold
-            sorted_indices_to_remove = cumulative_probs > top_p
-            # Shift the indices to the right to keep also the first token above the threshold
-            sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].clone()
-            sorted_indices_to_remove[..., 0] = 0
+            # 3. Apply top_p (nucleus sampling)
+            if top_p > 0.0 and top_p < 1.0:
+                sorted_logits, sorted_indices = torch.sort(logits, descending=True)
+                cumulative_probs = torch.cumsum(F.softmax(sorted_logits, dim=-1), dim=-1)
+                
+                # Remove tokens with cumulative probability above the threshold
+                sorted_indices_to_remove = cumulative_probs > top_p
+                # Shift the indices to the right to keep also the first token above the threshold
+                sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].clone()
+                sorted_indices_to_remove[..., 0] = 0
+                
+                indices_to_remove = torch.zeros_like(logits, dtype=torch.bool).scatter_(1, sorted_indices, sorted_indices_to_remove)
+                logits[indices_to_remove] = float('-inf')
+            # Sample from the filtered distribution
+            probs = F.softmax(logits, dim=-1) # (B, vocab_size)
+            # Note: multinomial is non-deterministic, so we check against HF with same seed
+            xcol = torch.multinomial(probs, num_samples=1)
             
-            indices_to_remove = torch.zeros_like(logits, dtype=torch.bool).scatter_(1, sorted_indices, sorted_indices_to_remove)
-            logits[indices_to_remove] = float('-inf')
-        # Sample from the filtered distribution
-        probs = F.softmax(logits, dim=-1) # (B, vocab_size)
-        # Note: multinomial is non-deterministic, so we check against HF with same seed
-        xcol = torch.multinomial(probs, num_samples=1)
-        
-        # append to seq
-        x = torch.cat((x, xcol), dim=1) # (B, T + 1)
-for i in range(num_return_sequences):
-    tokens = x[i, :max_length].tolist()
-    decoded = enc.decode(tokens)
-    print(">", decoded)
-print("\n--- HuggingFace Model Generation ---")
-# RESET the seed before running HF
-torch.manual_seed(42)
-torch.cuda.manual_seed(42)
-model_hf.eval()
-model_hf.to(device)
-# Start from the SAME input
-x_hf = x_input.clone()
-# generate the output
-# Note: we use max_length=max_length and remove num_return_sequences because x_hf is already batched to 5
-x_hf = model_hf.generate(
-    x_hf, 
-    max_length=max_length, 
-    do_sample=True, 
-    top_k=top_k_val, 
-    top_p=top_p, 
-    temperature=temperature,
-    pad_token_id=50256, # explicitly set to eos_token_id to suppress warning
-    attention_mask=torch.ones_like(x_hf) # explicitly tell HF there is no padding to suppress warning
-)
-for i in range(num_return_sequences):
-    tokens = x_hf[i, :max_length].tolist()
-    decoded = enc.decode(tokens)
-    print("HF >", decoded)
+            # append to seq
+            x = torch.cat((x, xcol), dim=1) # (B, T + 1)
+    for i in range(num_return_sequences):
+        tokens = x[i, :max_length].tolist()
+        decoded = enc.decode(tokens)
+        print(">", decoded)
+    print("\n--- HuggingFace Model Generation ---")
+    # RESET the seed before running HF
+    torch.manual_seed(42)
+    torch.cuda.manual_seed(42)
+    model_hf.eval()
+    model_hf.to(device)
+    # Start from the SAME input
+    x_hf = x_input.clone()
+    # generate the output
+    # Note: we use max_length=max_length and remove num_return_sequences because x_hf is already batched to 5
+    x_hf = model_hf.generate(
+        x_hf, 
+        max_length=max_length, 
+        do_sample=True, 
+        top_k=top_k_val, 
+        top_p=top_p, 
+        temperature=temperature,
+        pad_token_id=50256, # explicitly set to eos_token_id to suppress warning
+        attention_mask=torch.ones_like(x_hf) # explicitly tell HF there is no padding to suppress warning
+    )
+    for i in range(num_return_sequences):
+        tokens = x_hf[i, :max_length].tolist()
+        decoded = enc.decode(tokens)
+        print("HF >", decoded)
+
+if __name__ == "__main__":
+    test_pretrained_model()
