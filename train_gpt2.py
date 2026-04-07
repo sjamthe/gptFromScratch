@@ -1,3 +1,4 @@
+from torch.nn.functional import leaky_relu
 from dataclasses import dataclass
 import torch
 from torch import nn
@@ -17,6 +18,8 @@ class CausalSelfAttention(nn.Module):
         assert config.n_embd % config.n_head == 0
         self.c_attn = nn.Linear(config.n_embd, 3 * config.n_embd)
         self.c_proj = nn.Linear(config.n_embd, config.n_embd)
+        # scale the weights of c_proj using a flag
+        self.c_proj.NANO_GPT_SCALE_INIT = 1
         self.n_head = config.n_head
         self.n_embd = config.n_embd
         self.register_buffer("bias", torch.tril(torch.ones(config.block_size, config.block_size))
@@ -81,9 +84,24 @@ class GPT(nn.Module):
         })
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
         
-        # weight tying scheme: 
+        # weight sharing scheme between 1st and last layer maps tokens to logits and back to tokens:
         # https://paperswithcode.com/method/weight-tying
         self.transformer.wte.weight = self.lm_head.weight
+
+        # init params 
+        self.apply(self._init_weights)
+        
+    # init weights, important to see 0.02 used in gpt2 paper
+    def _init_weights(self, module: nn.Module):
+        if isinstance(module, nn.Linear):
+            std = 0.02
+            if hasattr(module, 'NANO_GPT_SCALE_INIT'):
+                std *= (2 * self.config.n_layer) ** -0.5
+            torch.nn.init.normal_(module.weight, mean=0.0, std=std)
+            if module.bias is not None:
+                torch.nn.init.zeros_(module.bias)
+        elif isinstance(module, nn.Embedding):
+            torch.nn.init.normal_(module.weight, mean=0.0, std=.02)
         
     def forward(self, idx: torch.Tensor, targets: torch.Tensor = None) -> tuple[torch.Tensor, torch.Tensor]:
         B, T = idx.size()
@@ -154,6 +172,73 @@ class GPT(nn.Module):
 
         return model, model_hf
 
+import tiktoken
+
+class DataLoaderLite:
+    def __init__(self, B, T):
+        self.B = B
+        self.T = T
+    
+        # at init load tokens from disk and store them in memory
+        enc = tiktoken.get_encoding("gpt2")
+        with open("input.txt", "r") as f:
+            text = f.read()
+        self.tokens = enc.encode(text)
+        self.tokens = torch.tensor(self.tokens, dtype=torch.long)
+        self.num_tokens = len(self.tokens)
+        print(f"Loaded {self.num_tokens} tokens from disk")
+        print(" 1 epoch = ", self.num_tokens // self.B // self.T, "batches")
+
+        # state
+        self.current_pos = 0
+
+    def next_batch(self):
+        # returns a (B, T) batch of input tokens and targets
+        B, T = self.B, self.T
+
+        buf = self.tokens[self.current_pos:self.current_pos+B*T+1]
+        x = buf[:-1].view(B, T) # inputs
+        y = buf[1:].view(B, T) # targets
+        # advance the position in the tensor
+        self.current_pos += B * T
+        # wrap around if we run out of tokens
+        if self.current_pos + B * T + 1 > self.num_tokens:
+            self.current_pos = 0
+        return x, y
+
+def train_gpt2():
+
+    device = 'cuda' if torch.cuda.is_available() else 'mps' if torch.backends.mps.is_available() else 'cpu'
+    print(f"Using device: {device}")
+
+    torch.manual_seed(1337)
+    if(torch.cuda.is_available()):
+        torch.cuda.manual_seed(1337)
+    
+    B = 4
+    T = 1024
+    learning_rate = 3e-4
+    epochs = 1000
+
+    train_loader = DataLoaderLite(B, T)
+    
+    model = GPT(GPTConfig())
+    model.to(device)
+    
+    # optimizer
+    optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
+    for i in range(epochs):
+        x, y = train_loader.next_batch()
+        x, y = x.to(device), y.to(device)
+        logits, loss = model(x, y)
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+        if i % 10 == 0:
+            print(f"Step {i}, Loss: {loss.item()}")
+        
+    
+    
 
 #Test run by pre-loading weights
 def test_pretrained_model():
@@ -254,4 +339,5 @@ def test_pretrained_model():
         print("HF >", decoded)
 
 if __name__ == "__main__":
-    test_pretrained_model()
+    # test_pretrained_model()
+    train_gpt2()
