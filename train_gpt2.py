@@ -3,6 +3,7 @@ from dataclasses import dataclass
 import torch
 from torch import nn
 from torch.nn import functional as F
+import inspect
 
 @dataclass
 class GPTConfig:
@@ -33,12 +34,16 @@ class CausalSelfAttention(nn.Module):
         q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
         k = k.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
         v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
-
         # Scale factor is 1/sqrt(head_size), where head_size is k.size(-1)
-        att = (q @ k.transpose(-2, -1)) * (k.size(-1) ** -0.5)
-        att = att.masked_fill(self.bias[:, :, :T, :T] == 0, float('-inf'))
-        att = F.softmax(att, dim=-1)
-        y = att @ v
+
+        #Attention calculation
+        # att = (q @ k.transpose(-2, -1)) * (k.size(-1) ** -0.5)
+        # att = att.masked_fill(self.bias[:, :, :T, :T] == 0, float('-inf'))
+        # att = F.softmax(att, dim=-1)
+        # y = att @ v
+        # replace above 4 att lines with flash attention (it is more helpful on NVDIA GPUs but give 5% speedup on MPS)
+        y = F.scaled_dot_product_attention(q, k, v, is_causal=True)
+
         y = y.transpose(1, 2).contiguous().view(B, T, C)
         y = self.c_proj(y)
         return y
@@ -122,6 +127,36 @@ class GPT(nn.Module):
             loss = None
         return logits, loss
     
+    def configure_optimizers(self, weight_decay, learning_rate, device):
+        # start with all of the candidate parameters that require grad
+        param_dict = dict(self.named_parameters())
+        param_dict = {k: v for k, v in param_dict.items() if v.requires_grad}
+        # create the two groups of parameters
+        # group 1: weight decay (all parameters that are 2D)
+        # group 2: no weight decay (all biases, layernorms parameters that are 1D)
+        decay_params = [p for k, p in param_dict.items() if p.dim() >= 2]
+        no_decay_params = [p for k, p in param_dict.items() if p.dim() < 2]
+        optim_groups = [
+            {'params': decay_params, 'weight_decay': weight_decay},
+            {'params': no_decay_params, 'weight_decay': 0.0}
+        ]
+        num_decay = sum(p.numel() for p in decay_params)
+        num_no_decay = sum(p.numel() for p in no_decay_params)
+        print(f"num decayed parameter tensors: {len(decay_params)} with {num_decay} parameters")
+        print(f"num non-decayed parameter tensors: {len(no_decay_params)} with {num_no_decay} parameters")  
+        # create the optimizer with weight decay and learning rate
+        fused_available = 'fused' in inspect.signature(torch.optim.AdamW.__init__).parameters
+        use_fused = fused_available and (device == 'cuda' or device == 'mps')
+        print(f"using fused AdamW: {use_fused}")
+        optimizer = torch.optim.AdamW(optim_groups, lr=learning_rate, betas=(0.9, 0.95), eps=1e-8, weight_decay=weight_decay, fused=use_fused)
+        return optimizer
+        
+        
+        
+                
+        
+        
+
     @classmethod
     def from_pretrained(cls, model_type):
         """Loads pretrained GPT-2 model weights from huggingface"""
@@ -206,6 +241,9 @@ class DataLoaderLite:
             self.current_pos = 0
         return x, y
 
+import time
+import math
+
 def train_gpt2():
 
     device = 'cuda' if torch.cuda.is_available() else 'mps' if torch.backends.mps.is_available() else 'cpu'
@@ -215,27 +253,81 @@ def train_gpt2():
     if(torch.cuda.is_available()):
         torch.cuda.manual_seed(1337)
     
-    B = 4
-    T = 1024
-    learning_rate = 3e-4
-    epochs = 1000
+    """
+    Original GPT2 paper user 0.5M (tokens) batch size so B * T = 500,000
+    or B = 500,000/1024 = 488. But this is too high for my GPU so we use gradient accumulation.
+    basically we process multiple batches and accumulate the gradients and then update the model parameters.
+    """
+    total_batch_size = 524288 # 0.5M tokens but multiple of 2^n
+    B = 4 # micro batch size
+    T = 1024 # context length
+    assert total_batch_size % (B * T) == 0, "total_batch_size must be divisible by (B * T)"
+    grad_accum_steps = total_batch_size // (B * T)
+    print(f"Total batch size: {total_batch_size}")
+    print(f"Micro batch size: {B}")
+    print(f"Context length: {T}")
+    print(f"Gradient accumulation steps: {grad_accum_steps}")
 
     train_loader = DataLoaderLite(B, T)
+
+    torch.set_float32_matmul_precision('high') # Copied it from Andrej Karpathy's nanoGPT repo. why is this done?
     
-    model = GPT(GPTConfig())
+    model = GPT(GPTConfig(vocab_size=50304)) #use vocab size as power of 2, more tokens (dummy) but it speeds up training
     model.to(device)
+    if device == 'cuda':
+        model = torch.compile(model)
     
-    # optimizer
-    optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
-    for i in range(epochs):
-        x, y = train_loader.next_batch()
-        x, y = x.to(device), y.to(device)
-        logits, loss = model(x, y)
+    max_lr = 6e-4
+    min_lr = max_lr * 0.1
+    warmup_steps = 10
+    max_steps = 50
+    # learning rate decay schedule
+    def get_lr(it):
+        # 1) linear warmup for warmup_steps
+        if it < warmup_steps:
+            return max_lr * (it+1) / warmup_steps
+        # 2) if it > lr_decay_iters, return min learning rate
+        if it > max_steps:
+            return min_lr
+        # 3) in between, use cosine decay down to min_lr
+        decay_ratio = (it - warmup_steps) / (max_steps - warmup_steps)
+        assert 0 <= decay_ratio <= 1
+        coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio))
+        return min_lr + (max_lr - min_lr) * coeff
+    
+    # optimizer (betas and eps values from gpt3 paper)
+    #optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4, betas=(0.9, 0.95), eps=1e-8)
+    optimizer = model.configure_optimizers(weight_decay=0.1, learning_rate=max_lr, device=device)
+    for step in range(max_steps):
+        t0 = time.time()
         optimizer.zero_grad()
-        loss.backward()
+        for micro_step in range(grad_accum_steps):
+            x, y = train_loader.next_batch()
+            x, y = x.to(device), y.to(device)
+            # Use autocast for mixed precision training. Pytorch decides what gets converted to bfloat16
+            with torch.autocast(device, dtype=torch.bfloat16):
+                logits, loss = model(x, y)
+            # normalize the loss by dividing by the number of gradient accumulation steps
+            # so that the magnitude of loss is same as without gradient accumulation as we want mean loss.
+            loss = loss / grad_accum_steps
+            loss.backward()
+        # clip model parameters to prevent exploding gradients per gpt3 paper
+        norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+        # determine and set learning rate
+        lr = get_lr(step)
+        for param_group in optimizer.param_groups:
+            param_group['lr'] = lr
+        
         optimizer.step()
-        if i % 10 == 0:
-            print(f"Step {i}, Loss: {loss.item()}")
+        if device == 'cuda':
+            torch.cuda.synchronize() # wait for GPU to finish
+        elif device == 'mps':
+            torch.mps.synchronize()
+        t1 = time.time()
+        dt = (t1 - t0)*1000 # ms
+        tokens_per_sec = grad_accum_steps * train_loader.B * train_loader.T / (t1 - t0)
+        if step % 1 == 0:
+            print(f"Step {step}, Loss: {loss.item():.4f}, lr: {lr:.4e}, norm: {norm:.4f}, Time: {dt:.2f}ms, Tokens per second: {tokens_per_sec:.2f}")
         
     
     
@@ -256,7 +348,8 @@ def test_pretrained_model():
 
     print("--- Custom Model Generation ---")
     torch.manual_seed(42)
-    torch.cuda.manual_seed(42)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(42)
 
     #Load the pretrained model
     model, model_hf = GPT.from_pretrained('gpt2')
@@ -272,7 +365,8 @@ def test_pretrained_model():
     x_input = tokens.to(device)
     print("--- Custom Model Generation ---")
     torch.manual_seed(42)
-    torch.cuda.manual_seed(42)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(42)
     # Start x with our input
     x = x_input.clone() 
     # generate the output
@@ -316,7 +410,8 @@ def test_pretrained_model():
     print("\n--- HuggingFace Model Generation ---")
     # RESET the seed before running HF
     torch.manual_seed(42)
-    torch.cuda.manual_seed(42)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(42)
     model_hf.eval()
     model_hf.to(device)
     # Start from the SAME input
