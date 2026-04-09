@@ -228,8 +228,11 @@ class DataLoaderLite:
         if not os.path.exists(input_path):
             raise FileNotFoundError(f"{input_path} not found. Please provide a dataset file.")
                 
+        import random
         with open(input_path, "r", encoding="utf-8") as f:
-            text = f.read()
+            lines = f.readlines()
+            random.shuffle(lines)
+            text = "".join(lines)
             
         raw_tokens = tokenizer.encode(text)
         
@@ -253,7 +256,7 @@ class DataLoaderLite:
         self.num_tokens = len(self.tokens)
         
         print(f"Loaded {self.num_tokens} tokens from disk")
-        print("1 epoch = ", self.num_tokens // (self.B * self.T), "steps")
+        print("1 epoch = ", self.num_tokens // (self.B * self.T), "micro-batches")
         self.current_pos = 0
 
     def next_batch(self):
@@ -306,15 +309,18 @@ def train_rpn_llm():
 
     torch.set_float32_matmul_precision('high') # Copied it from Andrej Karpathy's nanoGPT repo. why is this done?
     
-    model = GPT(GPTConfig(vocab_size=64)) #use vocab size as power of 2 (matches config defaults)
+    n_layer = 8
+    n_head = 8
+    n_embd = 512
+    model = GPT(GPTConfig(vocab_size=64, n_layer=n_layer, n_head=n_head, n_embd=n_embd)) #use vocab size as power of 2 (matches config defaults)
     model.to(device)
     if device == 'cuda':
         model = torch.compile(model)
-    
+    print("Model Parameters: ", sum(p.numel() for p in model.parameters()) / 1e6, "M")
     max_lr = 1e-3
     min_lr = max_lr * 0.1
-    warmup_steps = 100
-    max_steps = 5000
+    warmup_steps = 500
+    max_steps = 10000
     # learning rate decay schedule
     def get_lr(it):
         # 1) linear warmup for warmup_steps
@@ -344,6 +350,11 @@ def train_rpn_llm():
             "max_steps": max_steps,
             "train_dataset": train_dataset,
             "val_dataset": val_dataset,
+            "n_layer": n_layer,
+            "n_head": n_head,
+            "n_embd": n_embd,
+            # log model parameters
+            "model_params": sum(p.numel() for p in model.parameters()) / 1e6 # in millions
         }
     )
 
@@ -354,10 +365,10 @@ def train_rpn_llm():
     #optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4, betas=(0.9, 0.95), eps=1e-8)
     optimizer = model.configure_optimizers(weight_decay=0.1, learning_rate=max_lr, device=device)
     for step in range(max_steps):
-        if (step+1) % 50 == 0:
+        if (step+1) % 100 == 0:
             model.eval()
             val_loss_accum = 0.0
-            val_loss_steps = 20
+            val_loss_steps = 200
             with torch.no_grad():
                 for _ in range(val_loss_steps):
                     x_val, y_val = val_loader.next_batch()
@@ -366,7 +377,8 @@ def train_rpn_llm():
                         _, loss_val = model(x_val, y_val)
                     val_loss_accum += loss_val.item()
             val_loss_accum /= val_loss_steps
-            print(f"Step {step+1}, Val Loss: {val_loss_accum:.4f}")
+            val_perplexity = math.exp(val_loss_accum)
+            print(f"Step {step+1}, Val Loss: {val_loss_accum:.4f}, Val Perplexity: {val_perplexity:.4f}")
             model.train()
 
         t0 = time.time()
@@ -408,13 +420,15 @@ def train_rpn_llm():
                 "norm": norm,
                 "time": dt,
                 "tokens_per_sec": tokens_per_sec,
-                "val_loss": val_loss_accum
             }
+            if (step+1) % 100 == 0:
+                log_dict["val_loss"] = val_loss_accum
+                log_dict["val_perplexity"] = val_perplexity # Calculated upstream during validation
             # Provide the `step` explicitly so it syncs correctly in the WandB UI timeline!
             wandb.log(log_dict, step=step+1)
     
         # Save the model at every 100 steps 
-        if (step+1) % 1000 == 0:
+        if (step+1) % 2000 == 0:
             checkpoint = {
                 'model': model.state_dict(),
                 'optimizer': optimizer.state_dict(),
