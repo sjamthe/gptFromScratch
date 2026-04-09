@@ -4,6 +4,7 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 import inspect
+import wandb
 
 @dataclass
 class GPTConfig:
@@ -222,7 +223,7 @@ class DataLoaderLite:
         self.tokens = torch.tensor(self.tokens, dtype=torch.long)
         self.num_tokens = len(self.tokens)
         print(f"Loaded {self.num_tokens} tokens from disk")
-        print(" 1 epoch = ", self.num_tokens // self.B // self.T, "batches")
+        print("1 epoch = ", self.num_tokens // self.B // self.T, "steps")
 
         # state
         self.current_pos = 0
@@ -259,7 +260,7 @@ def train_gpt2():
     basically we process multiple batches and accumulate the gradients and then update the model parameters.
     """
     total_batch_size = 524288 # 0.5M tokens but multiple of 2^n
-    B = 4 # micro batch size
+    B = 8 # micro batch size
     T = 1024 # context length
     assert total_batch_size % (B * T) == 0, "total_batch_size must be divisible by (B * T)"
     grad_accum_steps = total_batch_size // (B * T)
@@ -279,8 +280,8 @@ def train_gpt2():
     
     max_lr = 6e-4
     min_lr = max_lr * 0.1
-    warmup_steps = 10
-    max_steps = 50
+    warmup_steps = 100
+    max_steps = 1000
     # learning rate decay schedule
     def get_lr(it):
         # 1) linear warmup for warmup_steps
@@ -295,12 +296,32 @@ def train_gpt2():
         coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio))
         return min_lr + (max_lr - min_lr) * coeff
     
+    # logging
+    wandb.init(
+        project="gpt-from-scratch",
+        name="gpt2-custom",
+        config={
+            "total_batch_size": total_batch_size,
+            "B": B,
+            "T": T,
+            "grad_accum_steps": grad_accum_steps,
+            "max_lr": max_lr,
+            "min_lr": min_lr,
+            "warmup_steps": warmup_steps,
+            "max_steps": max_steps,
+        }
+    )
+
+    # Expecected starting loss based on normal distribution of probability of all tokens
+    # -ln(1/vocab_size) = -ln(1/50304) = 10.8189
+    
     # optimizer (betas and eps values from gpt3 paper)
     #optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4, betas=(0.9, 0.95), eps=1e-8)
     optimizer = model.configure_optimizers(weight_decay=0.1, learning_rate=max_lr, device=device)
     for step in range(max_steps):
         t0 = time.time()
         optimizer.zero_grad()
+        loss_accum = 0
         for micro_step in range(grad_accum_steps):
             x, y = train_loader.next_batch()
             x, y = x.to(device), y.to(device)
@@ -310,6 +331,7 @@ def train_gpt2():
             # normalize the loss by dividing by the number of gradient accumulation steps
             # so that the magnitude of loss is same as without gradient accumulation as we want mean loss.
             loss = loss / grad_accum_steps
+            loss_accum += loss.detach()
             loss.backward()
         # clip model parameters to prevent exploding gradients per gpt3 paper
         norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
@@ -327,10 +349,30 @@ def train_gpt2():
         dt = (t1 - t0)*1000 # ms
         tokens_per_sec = grad_accum_steps * train_loader.B * train_loader.T / (t1 - t0)
         if step % 1 == 0:
-            print(f"Step {step}, Loss: {loss.item():.4f}, lr: {lr:.4e}, norm: {norm:.4f}, Time: {dt:.2f}ms, Tokens per second: {tokens_per_sec:.2f}")
+            print(f"Step {step}, Loss: {loss_accum.item():.4f}, lr: {lr:.4e}, norm: {norm:.4f}, Time: {dt:.2f}ms, Tokens per second: {tokens_per_sec:.2f}")
         
+        if step % 1 == 0:
+            wandb.log({
+                "loss": loss_accum.item(),
+                "lr": lr,
+                "norm": norm,
+                "time": dt,
+                "tokens_per_sec": tokens_per_sec,
+            })
     
-    
+        # Save the model at every 100 steps 
+        if step % 100 == 0:
+            checkpoint = {
+                'model': model.state_dict(),
+                'optimizer': optimizer.state_dict(),
+                'config': model.config,
+                'step': step,
+            'train_loader': train_loader,
+            }
+            torch.save(checkpoint, f'gpt2_checkpoint_{step}.pt')
+            print(f"Model checkpoint saved to gpt2_checkpoint_{step}.pt")
+   
+    wandb.finish()
 
 #Test run by pre-loading weights
 def test_pretrained_model():
