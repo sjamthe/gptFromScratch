@@ -2,7 +2,9 @@ import os
 import torch
 import json
 from collections import defaultdict
-from train_rpn_llm import GPT, GPTConfig, RPNTokenizer, DataLoaderLite
+#from train_rpn_llm import GPT, GPTConfig, RPNTokenizer, DataLoaderLite
+from model_rope import GPT, GPTConfig
+from train_rpn import RPNTokenizer, DataLoaderLite
 
 def calculate_carries(a_str, b_str, op):
     a, b = int(a_str), int(b_str)
@@ -223,5 +225,5 @@ def validate_model(checkpoint_path, test_file_path, output_fail_path):
 
 if __name__ == "__main__":
     import sys
-    model_path = sys.argv[1] if len(sys.argv) > 1 else "rpn10M_checkpoint_9999.pt"
-    validate_model(model_path, "data/RPNData-plusminus999padded-val.txt", "validation_failures_padded.txt")
+    model_path = sys.argv[1] if len(sys.argv) > 1 else "rope10M_checkpoint_9999.pt"
+    validate_model(model_path, "data/RPNData-999+-_test.txt", "rope_validation_failures_unpadded.txt")

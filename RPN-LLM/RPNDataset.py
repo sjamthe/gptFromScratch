@@ -139,19 +139,13 @@ class RPNDataset(Dataset):
                     
                 result = operators[op](a, b)
                 
-                # Determine spatial padding dimensions dynamically
-                op_digits = len(str(max_number))
-                # For answers: accounts for negatives (e.g. '-999') and addition overflow (e.g. '1998')
-                ans_digits = max(len(str(max_number * 2)), len(str(-max_number)))
-                
-                # Format integers with exact zero padding
+                # Format integers without decimal points
                 if result == int(result):
-                    result_str = f"{int(result):0{ans_digits}d}"
+                    result_str = str(int(result))
                 else:
                     result_str = str(result)
                 
-                # Spatially lock operands (e.g. '001 099 +')
-                rpn_expr = f"{a:0{op_digits}d} {b:0{op_digits}d} {op}"
+                rpn_expr = f"{a} {b} {op}"
                 
                 # Add to examples if we haven't reached the limit yet
                 example_key = (rpn_expr, result_str)
@@ -169,8 +163,8 @@ from tokenizers import Tokenizer
 if __name__ == "__main__":
 
     max_number = 999
-    # Tagging the files 'padded' so your new script knows exactly which texts to pull from!
-    file_path_prefix = "data/RPNData-plusminus" + str(max_number) + "padded"
+    # Tagging the files 'unpadded' so your new script knows exactly which texts to pull from!
+    file_path_prefix = "data/RPNData-plusminus" + str(max_number) + "unpadded"
 
     dataset = RPNDataset(
         num_samples=-1,
