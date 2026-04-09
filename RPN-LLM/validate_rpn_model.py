@@ -4,6 +4,36 @@ import json
 from collections import defaultdict
 from train_rpn_llm import GPT, GPTConfig, RPNTokenizer, DataLoaderLite
 
+def calculate_carries(a_str, b_str, op):
+    a, b = int(a_str), int(b_str)
+    if op == '-' and a < b:
+        a_str, b_str = b_str, str(a).zfill(len(b_str))
+        
+    a_digits = [int(x) for x in reversed(a_str)]
+    b_digits = [int(x) for x in reversed(b_str)]
+    
+    max_len = max(len(a_digits), len(b_digits))
+    a_digits += [0] * (max_len - len(a_digits))
+    b_digits += [0] * (max_len - len(b_digits))
+    
+    carries = 0
+    carry_val = 0
+    if op == '+':
+        for i in range(max_len):
+            if a_digits[i] + b_digits[i] + carry_val > 9:
+                carries += 1
+                carry_val = 1
+            else:
+                carry_val = 0
+    elif op == '-':
+        for i in range(max_len):
+            if a_digits[i] - b_digits[i] - carry_val < 0:
+                carries += 1
+                carry_val = 1
+            else:
+                carry_val = 0
+    return carries
+
 def validate_model(checkpoint_path, test_file_path, output_fail_path):
     device = 'cuda' if torch.cuda.is_available() else 'mps' if torch.backends.mps.is_available() else 'cpu'
     print(f"Using device: {device}")
@@ -61,6 +91,15 @@ def validate_model(checkpoint_path, test_file_path, output_fail_path):
     total_processed = 0
     total_correct = 0
     
+    total_by_carry = defaultdict(int)
+    correct_by_carry = defaultdict(int)
+    
+    edge_stats = {
+        'zero_operand': {'total': 0, 'correct': 0},
+        'negative_result': {'total': 0, 'correct': 0},
+        'normal': {'total': 0, 'correct': 0}
+    }
+    
     # Max generation steps for an answer (e.g. " <space> -1998 \n" -> ~7 tokens)
     max_new_tokens = 8
 
@@ -106,13 +145,32 @@ def validate_model(checkpoint_path, test_file_path, output_fail_path):
                 expected = batch_items[b]['expected_tokens']
                 expected_str = tokenizer.decode(expected).strip()
                 predicted_str = tokenizer.decode(gen_answer_tokens).strip() 
+                prompt_str = tokenizer.decode(batch_items[b]['prompt_tokens']).strip()
+                
+                parts = prompt_str.split(' ')
+                carries = 0
+                is_zero = False
+                if len(parts) >= 3:
+                    is_zero = (int(parts[0]) == 0 or int(parts[1]) == 0)
+                    carries = calculate_carries(parts[0], parts[1], parts[2])
+                    
+                is_neg = expected_str.startswith('-')
+                is_normal = not is_zero and not is_neg
+                
+                total_by_carry[carries] += 1
+                if is_zero: edge_stats['zero_operand']['total'] += 1
+                if is_neg: edge_stats['negative_result']['total'] += 1
+                if is_normal: edge_stats['normal']['total'] += 1
                 
                 if expected != gen_answer_tokens:
                     # Document failure
-                    prompt_str = tokenizer.decode(batch_items[b]['prompt_tokens']).strip()
                     failures.append(f"Q: {prompt_str} | Expected: {expected_str} | Predicted: {predicted_str}")
                 else:
                     total_correct += 1
+                    correct_by_carry[carries] += 1
+                    if is_zero: edge_stats['zero_operand']['correct'] += 1
+                    if is_neg: edge_stats['negative_result']['correct'] += 1
+                    if is_normal: edge_stats['normal']['correct'] += 1
 
     # 5. Output Results
     accuracy = (total_correct / total_processed) * 100
@@ -129,9 +187,41 @@ def validate_model(checkpoint_path, test_file_path, output_fail_path):
         for fail in failures:
             f.write(fail + "\n")
             
-    print(f"Failures dumped to {output_fail_path}")
+        f.write("\n--- Breakdown by Carry Operations ---\n")
+        f.write("Carries | Total   | Correct | Failures | Accuracy\n")
+        
+    print("\n--- Breakdown by Carry Operations ---")
+    print("Carries | Total   | Correct | Failures | Accuracy")
+    for c in sorted(total_by_carry.keys()):
+        tot = total_by_carry[c]
+        cor = correct_by_carry[c]   
+        fls = tot - cor
+        acc = (cor / tot) * 100 if tot > 0 else 0
+        stats = f"{c:<8}| {tot:<8}| {cor:<8}| {fls:<8}| {acc:.2f}%"
+        print(stats)
+        with open(output_fail_path, "a", encoding="utf-8") as f:
+            f.write(stats + "\n")
+            
+    with open(output_fail_path, "a", encoding="utf-8") as f:
+        f.write("\n--- Edge Case Analysis ---\n")
+        f.write(f"{'Category':<16} | {'Total':<8} | {'Correct':<8} | Accuracy\n")
+        for cat, stats in edge_stats.items():
+            tot = stats['total']
+            cor = stats['correct']
+            acc = (cor / tot) * 100 if tot > 0 else 0
+            f.write(f"{cat:<16} | {tot:<8} | {cor:<8} | {acc:.2f}%\n")
+            
+    print("\n--- Edge Case Analysis ---")
+    print(f"{'Category':<16} | {'Total':<8} | {'Correct':<8} | Accuracy")
+    for cat, stats in edge_stats.items():
+        tot = stats['total']
+        cor = stats['correct']
+        acc = (cor / tot) * 100 if tot > 0 else 0
+        print(f"{cat:<16} | {tot:<8} | {cor:<8} | {acc:.2f}%")
+        
+    print(f"\nFailures dumped to {output_fail_path}")
 
 if __name__ == "__main__":
     import sys
-    model_path = sys.argv[1] if len(sys.argv) > 1 else "gpt2_10M_checkpoint_9999.pt"
-    validate_model(model_path, "data/RPNData-999+-_test.txt", "validation_failures.txt")
+    model_path = sys.argv[1] if len(sys.argv) > 1 else "rpn10M_checkpoint_9999.pt"
+    validate_model(model_path, "data/RPNData-plusminus999padded-val.txt", "validation_failures_padded.txt")
