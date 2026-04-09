@@ -302,16 +302,16 @@ def train_rpn_llm():
     print(f"Context length: {T}")
     print(f"Gradient accumulation steps: {grad_accum_steps}")
 
-    train_dataset = "data/RPNData-999+-_train.txt"
-    val_dataset = "data/RPNData-999+-_test.txt"
+    train_dataset = "data/RPNData-plusminus999padded-train.txt"
+    val_dataset = "data/RPNData-plusminus999padded-test.txt"
     train_loader = DataLoaderLite(B, T, train_dataset)
     val_loader = DataLoaderLite(B, T, val_dataset)
 
     torch.set_float32_matmul_precision('high') # Copied it from Andrej Karpathy's nanoGPT repo. why is this done?
     
-    n_layer = 8
-    n_head = 8
-    n_embd = 512
+    n_layer = 6
+    n_head = 6
+    n_embd = 384
     model = GPT(GPTConfig(vocab_size=64, n_layer=n_layer, n_head=n_head, n_embd=n_embd)) #use vocab size as power of 2 (matches config defaults)
     model.to(device)
     if device == 'cuda':
@@ -338,7 +338,7 @@ def train_rpn_llm():
     # logging
     wandb.init(
         project="rpn-llm",
-        name="rpn-llm-999+--data",
+        name="rpn-999-padded",
         config={
             "total_batch_size": total_batch_size,
             "B": B,
@@ -365,7 +365,7 @@ def train_rpn_llm():
     #optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4, betas=(0.9, 0.95), eps=1e-8)
     optimizer = model.configure_optimizers(weight_decay=0.1, learning_rate=max_lr, device=device)
     for step in range(max_steps):
-        if (step+1) % 100 == 0:
+        if (step+1) % 200 == 0:
             model.eval()
             val_loss_accum = 0.0
             val_loss_steps = 200
@@ -421,7 +421,7 @@ def train_rpn_llm():
                 "time": dt,
                 "tokens_per_sec": tokens_per_sec,
             }
-            if (step+1) % 100 == 0:
+            if (step+1) % 200 == 0:
                 log_dict["val_loss"] = val_loss_accum
                 log_dict["val_perplexity"] = val_perplexity # Calculated upstream during validation
             # Provide the `step` explicitly so it syncs correctly in the WandB UI timeline!
@@ -436,8 +436,8 @@ def train_rpn_llm():
                 'step': step,
             'train_loader': train_loader,
             }
-            torch.save(checkpoint, f'gpt2_checkpoint_{step}.pt')
-            print(f"Model checkpoint saved to gpt2_checkpoint_{step}.pt")
+            torch.save(checkpoint, f'rpn10M_checkpoint_{step}.pt')
+            print(f"Model checkpoint saved to rpn10M_checkpoint_{step}.pt")
    
     wandb.finish()
 
