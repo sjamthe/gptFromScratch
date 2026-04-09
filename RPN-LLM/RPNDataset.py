@@ -114,15 +114,56 @@ class RPNDataset(Dataset):
             rpn_expr, answer = self._calc_rpn_expr(operands, ops)
             self.examples.append((rpn_expr, answer))
     
+    def _generate_scratchpad(self, a: int, b: int, op: str) -> str:
+        a_str, b_str = str(a), str(b)
+        max_len = max(len(a_str), len(b_str))
+        a_str = a_str.zfill(max_len)
+        b_str = b_str.zfill(max_len)
+        
+        steps = []
+        carry = 0
+        
+        if op == '+':
+            for i in range(max_len - 1, -1, -1):
+                d_a = int(a_str[i])
+                d_b = int(b_str[i])
+                res = d_a + d_b + carry
+                new_carry = res // 10
+                steps.append(f"{d_a} + {d_b} + {carry} = {res}")
+                carry = new_carry
+            ans = a + b
+            scratchpad = " : ".join(steps)
+            return f"< {scratchpad} > {ans}"
+            
+        elif op == '-':
+            is_negative = a < b
+            if is_negative:
+                a_str, b_str = str(b).zfill(max_len), str(a).zfill(max_len)
+                
+            for i in range(max_len - 1, -1, -1):
+                d_a = int(a_str[i])
+                d_b = int(b_str[i])
+                res = (d_a - carry) - d_b
+                if res < 0:
+                    res += 10
+                    new_carry = 1
+                else:
+                    new_carry = 0
+                steps.append(f"{d_a} - {d_b} - {carry} = {res}")
+                carry = new_carry
+                
+            scratchpad = " : ".join(steps)
+            ans = a - b
+            if is_negative:
+                return f"< - : {scratchpad} > {ans}"
+            else:
+                return f"< {scratchpad} > {ans}"
+        else:
+            return ""
+
     def _generate_2_operands_examples(self, num_samples: int, max_operands: int, 
                           operations: Tuple[str, ...], max_number: int):
         """Generate RPN expressions and calculate their answers."""
-        operators = {
-            '+': lambda a, b: a + b,
-            '-': lambda a, b: a - b,
-            '*': lambda a, b: a * b,
-            '/': lambda a, b: a / b
-        }
         
         # Set of possible operands from 0 to max_number
         possible_operands = list(range(max_number + 1))
@@ -137,14 +178,7 @@ class RPNDataset(Dataset):
                 if op == '/' and b == 0:
                     continue
                     
-                result = operators[op](a, b)
-                
-                # Format integers without decimal points
-                if result == int(result):
-                    result_str = str(int(result))
-                else:
-                    result_str = str(result)
-                
+                result_str = self._generate_scratchpad(a, b, op)
                 rpn_expr = f"{a} {b} {op}"
                 
                 # Add to examples if we haven't reached the limit yet
@@ -163,8 +197,8 @@ from tokenizers import Tokenizer
 if __name__ == "__main__":
 
     max_number = 999
-    # Tagging the files 'unpadded' so your new script knows exactly which texts to pull from!
-    file_path_prefix = "data/RPNData-plusminus" + str(max_number) + "unpadded"
+    # Tagging the files 'scratchpad' so your new script knows exactly which texts to pull from!
+    file_path_prefix = "data/RPNData-plusminus" + str(max_number) + "_scratchpad"
 
     dataset = RPNDataset(
         num_samples=-1,

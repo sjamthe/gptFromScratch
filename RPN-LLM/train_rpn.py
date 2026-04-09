@@ -85,7 +85,7 @@ def train_rpn_llm():
     
     total_batch_size = 8192
     B = 8
-    T = 32
+    T = 128  # Expanded vastly to support the 50-70 token length of Scratchpad chains!
     assert total_batch_size % (B * T) == 0, "total_batch_size must be divisible by (B * T)"
     grad_accum_steps = total_batch_size // (B * T)
     print(f"Total batch size: {total_batch_size}")
@@ -94,8 +94,8 @@ def train_rpn_llm():
     print(f"Gradient accumulation steps: {grad_accum_steps}")
 
     # Retarget completely UNPADDED data to test RoPE explicitly!
-    train_dataset = "data/RPNData-999+-_train.txt"
-    val_dataset = "data/RPNData-999+-_val.txt"
+    train_dataset = "data/RPNData-plusminus999_scratchpad-_train.txt"
+    val_dataset = "data/RPNData-plusminus999_scratchpad-_test.txt"
     train_loader = DataLoaderLite(B, T, train_dataset)
     val_loader = DataLoaderLite(B, T, val_dataset)
 
@@ -217,8 +217,8 @@ def train_rpn_llm():
                 'step': step,
                 'train_loader': train_loader,
             }
-            torch.save(checkpoint, f'rope10M_checkpoint_{step}.pt')
-            print(f"Model checkpoint saved to rope10M_checkpoint_{step}.pt")
+            torch.save(checkpoint, f'rope10M_scratchpad_checkpoint_{step}.pt')
+            print(f"Model checkpoint saved to rope10M_scratchpad_checkpoint_{step}.pt")
    
     wandb.finish()
 

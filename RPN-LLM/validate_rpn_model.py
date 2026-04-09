@@ -88,7 +88,7 @@ def validate_model(checkpoint_path, test_file_path, output_fail_path):
     print(f"Grouped into {len(length_groups)} different prompt lengths.")
     
     # 4. Batched Generation
-    max_batch_size = 1024
+    max_batch_size = 256 # Dropped heavily from 1024 to prevent 22GB MPS out-of-memory overheads on the new 60-step loops
     failures = []
     total_processed = 0
     total_correct = 0
@@ -102,8 +102,8 @@ def validate_model(checkpoint_path, test_file_path, output_fail_path):
         'normal': {'total': 0, 'correct': 0}
     }
     
-    # Max generation steps for an answer (e.g. " <space> -1998 \n" -> ~7 tokens)
-    max_new_tokens = 8
+    # Max generation steps for an answer
+    max_new_tokens = 96
 
     print("Beginning batched evaluation...")
     group_idx = 1
@@ -149,6 +149,9 @@ def validate_model(checkpoint_path, test_file_path, output_fail_path):
                 predicted_str = tokenizer.decode(gen_answer_tokens).strip() 
                 prompt_str = tokenizer.decode(batch_items[b]['prompt_tokens']).strip()
                 
+                expected_ans_str = expected_str.split('>')[-1].strip() if '>' in expected_str else expected_str
+                predicted_ans_str = predicted_str.split('>')[-1].strip() if '>' in predicted_str else predicted_str
+                
                 parts = prompt_str.split(' ')
                 carries = 0
                 is_zero = False
@@ -156,7 +159,7 @@ def validate_model(checkpoint_path, test_file_path, output_fail_path):
                     is_zero = (int(parts[0]) == 0 or int(parts[1]) == 0)
                     carries = calculate_carries(parts[0], parts[1], parts[2])
                     
-                is_neg = expected_str.startswith('-')
+                is_neg = expected_ans_str.startswith('-')
                 is_normal = not is_zero and not is_neg
                 
                 total_by_carry[carries] += 1
@@ -164,9 +167,10 @@ def validate_model(checkpoint_path, test_file_path, output_fail_path):
                 if is_neg: edge_stats['negative_result']['total'] += 1
                 if is_normal: edge_stats['normal']['total'] += 1
                 
-                if expected != gen_answer_tokens:
+                # Check absolute truth of final numerical output!
+                if expected_ans_str != predicted_ans_str:
                     # Document failure
-                    failures.append(f"Q: {prompt_str} | Expected: {expected_str} | Predicted: {predicted_str}")
+                    failures.append(f"Q: {prompt_str} | Expected: {expected_ans_str} | Predicted: {predicted_ans_str} | Full Pred: {predicted_str}")
                 else:
                     total_correct += 1
                     correct_by_carry[carries] += 1
@@ -225,5 +229,5 @@ def validate_model(checkpoint_path, test_file_path, output_fail_path):
 
 if __name__ == "__main__":
     import sys
-    model_path = sys.argv[1] if len(sys.argv) > 1 else "rope10M_checkpoint_9999.pt"
-    validate_model(model_path, "data/RPNData-999+-_test.txt", "rope_validation_failures_unpadded.txt")
+    model_path = sys.argv[1] if len(sys.argv) > 1 else "rope10M_scratchpad_checkpoint_9999.pt"
+    validate_model(model_path, "data/RPNData-plusminus999_scratchpad-_test.txt", "rope_validation_failures_scratchpad.txt")
