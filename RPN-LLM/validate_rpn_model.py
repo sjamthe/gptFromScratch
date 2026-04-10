@@ -274,5 +274,5 @@ def validate_model(checkpoint_path, test_file_path, output_fail_path):
 
 if __name__ == "__main__":
     import sys
-    model_path = sys.argv[1] if len(sys.argv) > 1 else "rope25M_padded_checkpoint_9999.pt"
-    validate_model(model_path, "data/RPNData-plusminus99999_scratchpad_padded_reversed-_test.txt", "rope_validation_failures_padded.txt")
+    model_path = sys.argv[1] if len(sys.argv) > 1 else "rope25M_balanced_checkpoint_9999.pt"
+    validate_model(model_path, "data/RPNData-plusminus99999_scratchpad_balanced_padded_reversed-_test.txt", "rope_validation_failures_balanced.txt")

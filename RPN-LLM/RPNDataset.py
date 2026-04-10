@@ -105,8 +105,13 @@ class RPNDataset(Dataset):
             # Decide number of operands (at least 2)
             num_operands = random.randint(2, max_operands)
             
-            # Generate operands
-            operands = [random.randint(1, max_number) for _ in range(num_operands)]
+            # Phase 6: Uniform dimensional bias completely erasing operand scarcity!
+            operands = []
+            for _ in range(num_operands):
+                num_digits = random.randint(1, len(str(max_number)))
+                curr_max = min(max_number, (10 ** num_digits) - 1)
+                curr_min = 0 if num_digits == 1 else (10 ** (num_digits - 1))
+                operands.append(random.randint(curr_min, curr_max))
             
             # Generate operations (need num_operands-1 operations)
             ops = [random.choice(operations) for _ in range(num_operands-1)]
@@ -198,8 +203,8 @@ from tokenizers import Tokenizer
 if __name__ == "__main__":
 
     max_number = 99999
-    # Tagging the files natively 'padded_reversed' targeting true spatial mapping arrays
-    file_path_prefix = "data/RPNData-plusminus" + str(max_number) + "_scratchpad_padded_reversed"
+    # Tagging Phase 6 balanced payload limits natively mapping structural array bounds dynamically!
+    file_path_prefix = "data/RPNData-plusminus" + str(max_number) + "_scratchpad_balanced_padded_reversed"
 
     dataset = RPNDataset(
         num_samples=2000000,
