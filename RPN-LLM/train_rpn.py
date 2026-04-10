@@ -93,9 +93,9 @@ def train_rpn_llm():
     print(f"Context length: {T}")
     print(f"Gradient accumulation steps: {grad_accum_steps}")
 
-    # Retarget dynamically sparse balanced numbers natively fixing uniform distribution traps!
-    train_dataset = "data/RPNData-plusminus99999_scratchpad_balanced_padded_reversed-_train.txt"
-    val_dataset = "data/RPNData-plusminus99999_scratchpad_balanced_padded_reversed-_test.txt"
+    # Phase 8: Disabling padding completely and explicitly reversing native mapping values.
+    train_dataset = "data/RPNData-plusminus99999_fully_reversed_nopad-_train.txt"
+    val_dataset = "data/RPNData-plusminus99999_fully_reversed_nopad-_test.txt"
     train_loader = DataLoaderLite(B, T, train_dataset)
     val_loader = DataLoaderLite(B, T, val_dataset)
 
@@ -217,8 +217,8 @@ def train_rpn_llm():
                 'step': step,
                 'train_loader': train_loader,
             }
-            torch.save(checkpoint, f'rope25M_balanced_checkpoint_{step}.pt')
-            print(f"Model checkpoint saved to rope25M_balanced_checkpoint_{step}.pt")
+            torch.save(checkpoint, f'rope25M_reversed_checkpoint_{step}.pt')
+            print(f"Model checkpoint saved to rope25M_reversed_checkpoint_{step}.pt")
    
     wandb.finish()
 

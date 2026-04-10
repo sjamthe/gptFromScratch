@@ -120,58 +120,54 @@ class RPNDataset(Dataset):
             self.examples.append((rpn_expr, answer))
     
     def _generate_scratchpad(self, a: int, b: int, op: str) -> str:
-        a_str, b_str = str(a), str(b)
+        # Inputs are ALREADY structurally reversed mapping characters
+        a_str, b_str = str(a)[::-1], str(b)[::-1]
         max_len = max(len(a_str), len(b_str))
-        a_str = a_str.zfill(max_len)
-        b_str = b_str.zfill(max_len)
         
         steps = []
         carry = 0
         
         if op == '+':
-            # Pre-compute alignment dynamically natively outputting padded blocks so RoPE pairs indices directly!
-            steps.append(f"{a_str} + {b_str}")
-            
-            for i in range(max_len - 1, -1, -1):
-                d_a = int(a_str[i])
-                d_b = int(b_str[i])
+            for i in range(max_len):
+                d_a = int(a_str[i]) if i < len(a_str) else 0
+                d_b = int(b_str[i]) if i < len(b_str) else 0
                 res = d_a + d_b + carry
                 new_carry = res // 10
                 steps.append(f"{d_a} + {d_b} + {carry} = {res}")
                 carry = new_carry
+                
             ans = a + b
-            ans_str = "-" + str(abs(ans))[::-1] if ans < 0 else str(ans)[::-1]
+            ans_str = str(ans)[::-1] 
             scratchpad = " : ".join(steps)
             return f"< {scratchpad} > {ans_str}"
             
         elif op == '-':
             is_negative = a < b
-            if is_negative:
-                a_str, b_str = str(b).zfill(max_len), str(a).zfill(max_len)
-            else:
-                a_str, b_str = str(a).zfill(max_len), str(b).zfill(max_len)
+            # Top is ALWAYS the structurally larger integer to evaluate clean sub-loops!
+            top_str = b_str if is_negative else a_str
+            bot_str = a_str if is_negative else b_str
+
+            for i in range(max_len):
+                d_t = int(top_str[i]) if i < len(top_str) else 0
+                d_b = int(bot_str[i]) if i < len(bot_str) else 0
                 
-            steps.append(f"{a_str} - {b_str}")
-                
-            for i in range(max_len - 1, -1, -1):
-                d_a = int(a_str[i])
-                d_b = int(b_str[i])
-                res = (d_a - carry) - d_b
+                res = (d_t - carry) - d_b
                 if res < 0:
                     res += 10
                     new_carry = 1
                 else:
                     new_carry = 0
-                steps.append(f"{d_a} - {d_b} - {carry} = {res}")
+                    
+                steps.append(f"{d_t} - {d_b} - {carry} = {res}")
                 carry = new_carry
                 
-            scratchpad = " : ".join(steps)
             ans = a - b
-            ans_str = "-" + str(abs(ans))[::-1] if ans < 0 else str(ans)[::-1]
-            if is_negative:
-                return f"< - : {scratchpad} > {ans_str}"
-            else:
-                return f"< {scratchpad} > {ans_str}"
+            # Result naturally appends `-` to strings representing mathematically negative strings backwards.
+            ans_str = str(abs(ans))[::-1] + "-" if ans < 0 else str(ans)[::-1]
+            scratchpad = " : ".join(steps)
+            
+            prefix = "< - : " if is_negative else "< "
+            return f"{prefix}{scratchpad} > {ans_str}"
         else:
             return ""
 
@@ -190,7 +186,8 @@ class RPNDataset(Dataset):
                 continue
                 
             result_str = self._generate_scratchpad(a, b, op)
-            rpn_expr = f"{a} {b} {op}"
+            a_rev, b_rev = str(a)[::-1], str(b)[::-1]
+            rpn_expr = f"{a_rev} {b_rev} {op}"
             
             example_key = (rpn_expr, result_str)
             if example_key not in generated_examples:
@@ -203,8 +200,8 @@ from tokenizers import Tokenizer
 if __name__ == "__main__":
 
     max_number = 99999
-    # Tagging Phase 6 balanced payload limits natively mapping structural array bounds dynamically!
-    file_path_prefix = "data/RPNData-plusminus" + str(max_number) + "_scratchpad_balanced_padded_reversed"
+    # Tagging Phase 8 fully reversed scale-invariant baseline payload limits natively!
+    file_path_prefix = "data/RPNData-plusminus" + str(max_number) + "_fully_reversed_nopad"
 
     dataset = RPNDataset(
         num_samples=2000000,
