@@ -22,7 +22,7 @@ class RPNDataset(Dataset):
         if file_path:
             self._load_from_file(file_path)
         else:
-            self._generate_2_operands_examples(num_samples, max_operands, operations, max_number)
+            self._generate_random_scratchpad_examples(num_samples, operations, max_number)
     
     def _load_from_file(self, file_path: str):
         """Load RPN expressions and answers from a file."""
@@ -124,6 +124,9 @@ class RPNDataset(Dataset):
         carry = 0
         
         if op == '+':
+            # Pre-compute alignment dynamically natively outputting padded blocks so RoPE pairs indices directly!
+            steps.append(f"{a_str} + {b_str}")
+            
             for i in range(max_len - 1, -1, -1):
                 d_a = int(a_str[i])
                 d_b = int(b_str[i])
@@ -132,13 +135,18 @@ class RPNDataset(Dataset):
                 steps.append(f"{d_a} + {d_b} + {carry} = {res}")
                 carry = new_carry
             ans = a + b
+            ans_str = "-" + str(abs(ans))[::-1] if ans < 0 else str(ans)[::-1]
             scratchpad = " : ".join(steps)
-            return f"< {scratchpad} > {ans}"
+            return f"< {scratchpad} > {ans_str}"
             
         elif op == '-':
             is_negative = a < b
             if is_negative:
                 a_str, b_str = str(b).zfill(max_len), str(a).zfill(max_len)
+            else:
+                a_str, b_str = str(a).zfill(max_len), str(b).zfill(max_len)
+                
+            steps.append(f"{a_str} - {b_str}")
                 
             for i in range(max_len - 1, -1, -1):
                 d_a = int(a_str[i])
@@ -154,54 +162,47 @@ class RPNDataset(Dataset):
                 
             scratchpad = " : ".join(steps)
             ans = a - b
+            ans_str = "-" + str(abs(ans))[::-1] if ans < 0 else str(ans)[::-1]
             if is_negative:
-                return f"< - : {scratchpad} > {ans}"
+                return f"< - : {scratchpad} > {ans_str}"
             else:
-                return f"< {scratchpad} > {ans}"
+                return f"< {scratchpad} > {ans_str}"
         else:
             return ""
 
-    def _generate_2_operands_examples(self, num_samples: int, max_operands: int, 
-                          operations: Tuple[str, ...], max_number: int):
-        """Generate RPN expressions and calculate their answers."""
+    def _generate_random_scratchpad_examples(self, num_samples: int, operations: Tuple[str, ...], max_number: int):
+        """Generate extremely sparse variable-length math combinations!"""
         
-        # Set of possible operands from 0 to max_number
-        possible_operands = list(range(max_number + 1))
-        
-        # Create a set to track generated examples to avoid duplicates
         generated_examples = set()
         
-        #handle 2-operand expressions systematically
-        for a, b in itertools.product(possible_operands, possible_operands):
-            for op in operations:
-                # Skip division by zero
-                if op == '/' and b == 0:
-                    continue
-                    
-                result_str = self._generate_scratchpad(a, b, op)
-                rpn_expr = f"{a} {b} {op}"
+        while len(self.examples) < num_samples:
+            a = random.randint(0, max_number)
+            b = random.randint(0, max_number)
+            op = random.choice(operations)
+            
+            # Skip division by zero
+            if op == '/' and b == 0:
+                continue
                 
-                # Add to examples if we haven't reached the limit yet
-                example_key = (rpn_expr, result_str)
-                if example_key not in generated_examples:
-                    generated_examples.add(example_key)
-                    self.examples.append(example_key)
-                    
-                    # Break if we've reached our target sample count
-                    if num_samples > 0 and len(self.examples) >= num_samples:
-                        return
+            result_str = self._generate_scratchpad(a, b, op)
+            rpn_expr = f"{a} {b} {op}"
+            
+            example_key = (rpn_expr, result_str)
+            if example_key not in generated_examples:
+                generated_examples.add(example_key)
+                self.examples.append(example_key)
                     
 # Example usage:
 from tokenizers import Tokenizer
 
 if __name__ == "__main__":
 
-    max_number = 999
-    # Tagging the files 'scratchpad' so your new script knows exactly which texts to pull from!
-    file_path_prefix = "data/RPNData-plusminus" + str(max_number) + "_scratchpad"
+    max_number = 99999
+    # Tagging the files natively 'padded_reversed' targeting true spatial mapping arrays
+    file_path_prefix = "data/RPNData-plusminus" + str(max_number) + "_scratchpad_padded_reversed"
 
     dataset = RPNDataset(
-        num_samples=-1,
+        num_samples=2000000,
         max_operands=2,
         operations=('+','-',),  # Start with just addition
         max_number=max_number

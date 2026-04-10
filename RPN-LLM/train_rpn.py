@@ -84,8 +84,8 @@ def train_rpn_llm():
         torch.cuda.manual_seed(1337)
     
     total_batch_size = 8192
-    B = 8
-    T = 128  # Expanded vastly to support the 50-70 token length of Scratchpad chains!
+    B = 4
+    T = 256  # 256 deeply tracks cross-5-digit logic formats flawlessly!
     assert total_batch_size % (B * T) == 0, "total_batch_size must be divisible by (B * T)"
     grad_accum_steps = total_batch_size // (B * T)
     print(f"Total batch size: {total_batch_size}")
@@ -93,21 +93,21 @@ def train_rpn_llm():
     print(f"Context length: {T}")
     print(f"Gradient accumulation steps: {grad_accum_steps}")
 
-    # Retarget completely UNPADDED data to test RoPE explicitly!
-    train_dataset = "data/RPNData-plusminus999_scratchpad-_train.txt"
-    val_dataset = "data/RPNData-plusminus999_scratchpad-_test.txt"
+    # Retarget dynamically sparse reversed numbers
+    train_dataset = "data/RPNData-plusminus99999_scratchpad_padded_reversed-_train.txt"
+    val_dataset = "data/RPNData-plusminus99999_scratchpad_padded_reversed-_test.txt"
     train_loader = DataLoaderLite(B, T, train_dataset)
     val_loader = DataLoaderLite(B, T, val_dataset)
 
     torch.set_float32_matmul_precision('high')
     
-    # Standard 10M Model params
-    n_layer = 6
-    n_head = 6
-    n_embd = 384
+    # High-Capacity 35M Model params
+    n_layer = 8
+    n_head = 8
+    n_embd = 512
     
-    # Initialize from our new RoPE Model config limits
-    model = GPT(GPTConfig(vocab_size=64, n_layer=n_layer, n_head=n_head, n_embd=n_embd, block_size=1024))
+    # Initialize natively tracking deeply scaled logic limits
+    model = GPT(GPTConfig(vocab_size=64, n_layer=n_layer, n_head=n_head, n_embd=n_embd, block_size=2048))
     model.to(device)
     if device == 'cuda':
         model = torch.compile(model)
@@ -217,8 +217,8 @@ def train_rpn_llm():
                 'step': step,
                 'train_loader': train_loader,
             }
-            torch.save(checkpoint, f'rope10M_scratchpad_checkpoint_{step}.pt')
-            print(f"Model checkpoint saved to rope10M_scratchpad_checkpoint_{step}.pt")
+            torch.save(checkpoint, f'rope25M_padded_checkpoint_{step}.pt')
+            print(f"Model checkpoint saved to rope25M_padded_checkpoint_{step}.pt")
    
     wandb.finish()
 

@@ -7,11 +7,11 @@ import inspect
 
 @dataclass
 class GPTConfig:
-    block_size: int = 1024 # max sequence length
-    vocab_size: int = 64 # number of tokens: 50,000 BPE merges + 256 bytes tokens + 1 <|endoftext|> token
-    n_layer: int = 2 # number of transformer blocks
-    n_head: int = 2 # number of attention heads
-    n_embd: int = 32 # embedding dimension
+    block_size: int = 2048 # max sequence length
+    vocab_size: int = 50 # number of tokens: 50,000 BPE merges + 256 bytes tokens + 1 <|endoftext|> token
+    n_layer: int = 8 # number of transformer blocks
+    n_head: int = 8 # number of attention heads
+    n_embd: int = 512 # embedding dimension
 
 # --- RoPE Implementation ---
 def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0):

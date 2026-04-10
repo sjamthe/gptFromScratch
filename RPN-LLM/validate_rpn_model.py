@@ -1,8 +1,8 @@
 import os
 import torch
 import json
+import time
 from collections import defaultdict
-#from train_rpn_llm import GPT, GPTConfig, RPNTokenizer, DataLoaderLite
 from model_rope import GPT, GPTConfig
 from train_rpn import RPNTokenizer, DataLoaderLite
 
@@ -103,25 +103,35 @@ def validate_model(checkpoint_path, test_file_path, output_fail_path):
     }
     
     # Max generation steps for an answer
-    max_new_tokens = 96
+    # A padded 5-digit math evaluates to ~112 tokens dynamically, pushing past the bounds of 96 natively!
+    max_new_tokens = 128
+
+    total_items = sum(len(items) for items in length_groups.values())
+    start_time = time.time()
+    overall_tokens_gen = 0
+
+    # Ensure output file is freshly clean before append looping!
+    with open(output_fail_path, "w", encoding="utf-8") as f:
+        f.write("--- Real-time Validation Failures ---\n\n")
 
     print("Beginning batched evaluation...")
     group_idx = 1
     for length, items in length_groups.items():
-        print(f"Evaluating group {group_idx}/{len(length_groups)} (prompt length {length}) - {len(items)} items...")
+        print(f"\n--- Evaluating group {group_idx}/{len(length_groups)} (prompt length {length}) - {len(items)} items ---")
         group_idx += 1
         
         # Process in chunks of max_batch_size
         for i in range(0, len(items), max_batch_size):
             batch_items = items[i:i+max_batch_size]
             B = len(batch_items)
-            total_processed += B
             
             # Construct (B, L) tensor natively (no padding required because all logic lengths identically match)
             prompts = torch.tensor([item['prompt_tokens'] for item in batch_items], dtype=torch.long, device=device)
             
             # Generate max_new_tokens sequentially using Argmax
             idx = prompts
+            
+            t0 = time.time()
             
             for _ in range(max_new_tokens):
                 idx_cond = idx if idx.size(1) <= config.block_size else idx[:, -config.block_size:]
@@ -132,7 +142,15 @@ def validate_model(checkpoint_path, test_file_path, output_fail_path):
                 logits = logits[:, -1, :] # Pluck final step logits
                 idx_next = torch.argmax(logits, dim=-1, keepdim=True) # Deterministic greedy decision
                 idx = torch.cat((idx, idx_next), dim=1) # Append
-                
+            
+            t1 = time.time()
+            batch_time = t1 - t0
+            overall_tokens_gen += B * max_new_tokens
+            tokens_per_sec = (B * max_new_tokens) / batch_time if batch_time > 0 else 0
+            
+            total_processed += B
+            pct_complete = (total_processed / total_items) * 100
+                            
             # Extract and verify the generated characters
             for b in range(B):
                 full_generated_tokens = idx[b].tolist()
@@ -152,6 +170,19 @@ def validate_model(checkpoint_path, test_file_path, output_fail_path):
                 expected_ans_str = expected_str.split('>')[-1].strip() if '>' in expected_str else expected_str
                 predicted_ans_str = predicted_str.split('>')[-1].strip() if '>' in predicted_str else predicted_str
                 
+                # Intercept trailing artifacts generated forcefully beyond equation bounds!
+                predicted_ans_str = predicted_ans_str.split('[UNK]')[0].split('\n')[0].strip()
+                expected_ans_str = expected_ans_str.split('[UNK]')[0].split('\n')[0].strip()
+                
+                def flip_ans(s):
+                    s = s.replace(" ", "")
+                    if s.startswith("-"):
+                        return "-" + s[1:][::-1]
+                    return s[::-1]
+                
+                expected_ans_flipped = flip_ans(expected_ans_str)
+                predicted_ans_flipped = flip_ans(predicted_ans_str)
+                
                 parts = prompt_str.split(' ')
                 carries = 0
                 is_zero = False
@@ -159,7 +190,7 @@ def validate_model(checkpoint_path, test_file_path, output_fail_path):
                     is_zero = (int(parts[0]) == 0 or int(parts[1]) == 0)
                     carries = calculate_carries(parts[0], parts[1], parts[2])
                     
-                is_neg = expected_ans_str.startswith('-')
+                is_neg = expected_ans_flipped.startswith('-')
                 is_normal = not is_zero and not is_neg
                 
                 total_by_carry[carries] += 1
@@ -170,13 +201,21 @@ def validate_model(checkpoint_path, test_file_path, output_fail_path):
                 # Check absolute truth of final numerical output!
                 if expected_ans_str != predicted_ans_str:
                     # Document failure
-                    failures.append(f"Q: {prompt_str} | Expected: {expected_ans_str} | Predicted: {predicted_ans_str} | Full Pred: {predicted_str}")
+                    fail_str = f"Q: {prompt_str} | Expected: {expected_ans_flipped} | Predicted: {predicted_ans_flipped} | Full Pred: {predicted_str}"
+                    failures.append(fail_str)
+                    # Stream directly to disk live!
+                    with open(output_fail_path, "a", encoding="utf-8") as f:
+                        f.write(fail_str + "\n")
                 else:
                     total_correct += 1
                     correct_by_carry[carries] += 1
                     if is_zero: edge_stats['zero_operand']['correct'] += 1
                     if is_neg: edge_stats['negative_result']['correct'] += 1
                     if is_normal: edge_stats['normal']['correct'] += 1
+
+            # print accuracy
+            accuracy = (total_correct / total_processed) * 100
+            print(f"Progress: {total_processed}/{total_items} ({pct_complete:.2f}%) | Accuracy: {accuracy:.2f}% | Batch inference time: {batch_time:.2f}s | Tokens/sec: {tokens_per_sec:.1f}")
 
     # 5. Output Results
     accuracy = (total_correct / total_processed) * 100
@@ -187,11 +226,9 @@ def validate_model(checkpoint_path, test_file_path, output_fail_path):
     print(f"Total Failures: {len(failures)}")
     print(f"Accuracy: {accuracy:.2f}%")
     
-    with open(output_fail_path, "w", encoding="utf-8") as f:
-        f.write(f"Validation Accuracy: {accuracy:.2f}% ({total_correct}/{total_processed})\n")
+    with open(output_fail_path, "a", encoding="utf-8") as f:
+        f.write(f"\nValidation Accuracy: {accuracy:.2f}% ({total_correct}/{total_processed})\n")
         f.write("=========================================\n\n")
-        for fail in failures:
-            f.write(fail + "\n")
             
         f.write("\n--- Breakdown by Carry Operations ---\n")
         f.write("Carries | Total   | Correct | Failures | Accuracy\n")
@@ -229,5 +266,5 @@ def validate_model(checkpoint_path, test_file_path, output_fail_path):
 
 if __name__ == "__main__":
     import sys
-    model_path = sys.argv[1] if len(sys.argv) > 1 else "rope10M_scratchpad_checkpoint_9999.pt"
-    validate_model(model_path, "data/RPNData-plusminus999_scratchpad-_test.txt", "rope_validation_failures_scratchpad.txt")
+    model_path = sys.argv[1] if len(sys.argv) > 1 else "rope25M_padded_checkpoint_9999.pt"
+    validate_model(model_path, "data/RPNData-plusminus99999_scratchpad_padded_reversed-_test.txt", "rope_validation_failures_padded.txt")
