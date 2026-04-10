@@ -52,7 +52,7 @@ class CausalSelfAttention(nn.Module):
         self.n_embd = config.n_embd
         # No absolute bias mask initialization needed for flash attention
     
-    def forward(self, x: torch.Tensor, freqs_cis: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, freqs_cis: torch.Tensor, use_cache: bool = False, cache_state: tuple = None) -> tuple[torch.Tensor, tuple]:
         B, T, C = x.size()
         qkv = self.c_attn(x)
         q,k,v = qkv.split(self.n_embd, dim=2)
@@ -62,22 +62,35 @@ class CausalSelfAttention(nn.Module):
         k = k.view(B, T, self.n_head, C // self.n_head)
         v = v.view(B, T, self.n_head, C // self.n_head)
 
+        offset = 0
+        if use_cache and cache_state is not None:
+            # cache_state[0] is k_cache of shape (B, n_head, T_cache, head_dim)
+            offset = cache_state[0].size(2)
+
         # Apply RoPE
         if freqs_cis is not None:
-            # slice freqs_cis to current sequence length
-            q, k = apply_rotary_emb(q, k, freqs_cis[:T])
+            # slice freqs_cis exactly aligning to the absolute sequence indices!
+            q, k = apply_rotary_emb(q, k, freqs_cis[offset : offset + T])
             
-        # Transpose for attention computation: (B, n_head, T, head_dim)
+        # Transpose for attention computation: (B, n_head, T_new, head_dim)
         q = q.transpose(1, 2)
         k = k.transpose(1, 2)
         v = v.transpose(1, 2)
 
-        # Flash attention
-        y = F.scaled_dot_product_attention(q, k, v, is_causal=True)
+        if use_cache:
+            if cache_state is not None:
+                k_cache, v_cache = cache_state
+                k = torch.cat([k_cache, k], dim=2)
+                v = torch.cat([v_cache, v], dim=2)
+            cache_state = (k, v)
+
+        # Flash attention handles custom causality correctly when queries run dynamically token-by-token
+        is_causal = (T > 1) 
+        y = F.scaled_dot_product_attention(q, k, v, is_causal=is_causal)
 
         y = y.transpose(1, 2).contiguous().view(B, T, C)
         y = self.c_proj(y)
-        return y
+        return y, cache_state
 
 class MLP(nn.Module):
     def __init__(self, config: GPTConfig):
@@ -100,10 +113,11 @@ class Block(nn.Module):
         self.ln_2 = nn.LayerNorm(config.n_embd)
         self.mlp = MLP(config)
     
-    def forward(self, x: torch.Tensor, freqs_cis: torch.Tensor) -> torch.Tensor:
-        x = x + self.attn(self.ln_1(x), freqs_cis)
+    def forward(self, x: torch.Tensor, freqs_cis: torch.Tensor, use_cache: bool = False, cache_state: tuple = None) -> tuple[torch.Tensor, tuple]:
+        attn_out, cache_out = self.attn(self.ln_1(x), freqs_cis, use_cache=use_cache, cache_state=cache_state)
+        x = x + attn_out
         x = x + self.mlp(self.ln_2(x))
-        return x
+        return x, cache_out
 
 class GPT(nn.Module):
     
@@ -138,24 +152,31 @@ class GPT(nn.Module):
         elif isinstance(module, nn.Embedding):
             torch.nn.init.normal_(module.weight, mean=0.0, std=.02)
         
-    def forward(self, idx: torch.Tensor, targets: torch.Tensor = None) -> tuple[torch.Tensor, torch.Tensor]:
+    def forward(self, idx: torch.Tensor, targets: torch.Tensor = None, use_cache: bool = False, past_key_values: list = None) -> tuple:
         B, T = idx.size()
-        assert T <= self.config.block_size, f"Cannot forward sequence of length {T}, block size is {self.config.block_size}"
 
         x = self.transformer.wte(idx)
         
         freqs_cis = self.freqs_cis
-        for block in self.transformer.h:
-            x = block(x, freqs_cis)
+        present_key_values = [] if use_cache else None
+        
+        for i, block in enumerate(self.transformer.h):
+            cache_in = past_key_values[i] if past_key_values is not None else None
+            x, cache_out = block(x, freqs_cis, use_cache=use_cache, cache_state=cache_in)
+            if use_cache:
+                present_key_values.append(cache_out)
             
         x = self.transformer.ln_f(x)
         
+        loss = None
         if targets is not None:
             logits = self.lm_head(x)
             loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1))
         else:
             logits = self.lm_head(x[:, [-1], :])
-            loss = None
+            
+        if use_cache:
+            return logits, loss, present_key_values
         return logits, loss
     
     def configure_optimizers(self, weight_decay, learning_rate, device):

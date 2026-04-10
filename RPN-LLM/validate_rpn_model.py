@@ -88,7 +88,7 @@ def validate_model(checkpoint_path, test_file_path, output_fail_path):
     print(f"Grouped into {len(length_groups)} different prompt lengths.")
     
     # 4. Batched Generation
-    max_batch_size = 256 # Dropped heavily from 1024 to prevent 22GB MPS out-of-memory overheads on the new 60-step loops
+    max_batch_size = 32 # Dropped surgically to prevent Apple MPS fragmenting the KV Cache memory allocation bounds!
     failures = []
     total_processed = 0
     total_correct = 0
@@ -133,15 +133,23 @@ def validate_model(checkpoint_path, test_file_path, output_fail_path):
             
             t0 = time.time()
             
-            for _ in range(max_new_tokens):
-                idx_cond = idx if idx.size(1) <= config.block_size else idx[:, -config.block_size:]
+            past_kv = None
+            for step in range(max_new_tokens):
+                # If KV Cache is fully loaded, ONLY pass the raw isolated new single token forward!
+                idx_cond = idx[:, -1:] if past_kv is not None else idx
+                
                 with torch.no_grad():
                     with torch.autocast(device, dtype=torch.bfloat16):
-                        logits, _ = model(idx_cond)
+                        logits, _, past_kv = model(idx_cond, use_cache=True, past_key_values=past_kv)
                 
                 logits = logits[:, -1, :] # Pluck final step logits
                 idx_next = torch.argmax(logits, dim=-1, keepdim=True) # Deterministic greedy decision
                 idx = torch.cat((idx, idx_next), dim=1) # Append
+                
+                # Apple MPS has a structural bug where tight internal `torch.cat` matrices 
+                # heavily defer Garbage Collection! Natively sync the caches securely!
+                if device == "mps":
+                    torch.mps.empty_cache()
             
             t1 = time.time()
             batch_time = t1 - t0
