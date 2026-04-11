@@ -12,3 +12,4 @@ wheels/
 wandb/
 .DS_Store
 data/
+results/

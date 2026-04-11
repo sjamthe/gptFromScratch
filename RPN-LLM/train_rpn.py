@@ -75,7 +75,7 @@ class DataLoaderLite:
         self.current_pos += B * T
         return x, y
 
-def train_rpn_llm():
+def train_rpn_llm(start_step=0, checkpoint_path=None):
     device = 'cuda' if torch.cuda.is_available() else 'mps' if torch.backends.mps.is_available() else 'cpu'
     print(f"Using device: {device}")
 
@@ -94,8 +94,8 @@ def train_rpn_llm():
     print(f"Gradient accumulation steps: {grad_accum_steps}")
 
     # Phase 8: Disabling padding completely and explicitly reversing native mapping values.
-    train_dataset = "data/RPNData-plusminus99999_fully_reversed_nopad-_train.txt"
-    val_dataset = "data/RPNData-plusminus99999_fully_reversed_nopad-_test.txt"
+    train_dataset = "data/RPNData-plusminus99999_model_driven_reversals-_train.txt"
+    val_dataset = "data/RPNData-plusminus99999_model_driven_reversals-_val.txt"
     train_loader = DataLoaderLite(B, T, train_dataset)
     val_loader = DataLoaderLite(B, T, val_dataset)
 
@@ -116,7 +116,7 @@ def train_rpn_llm():
     max_lr = 1e-3
     min_lr = max_lr * 0.1
     warmup_steps = 500
-    max_steps = 10000
+    max_steps = 62277
 
     def get_lr(it):
         if it < warmup_steps:
@@ -150,21 +150,64 @@ def train_rpn_llm():
     )
 
     optimizer = model.configure_optimizers(weight_decay=0.1, learning_rate=max_lr, device=device)
-    for step in range(max_steps):
+    
+    if checkpoint_path is not None:
+        print(f"Loading checkpoint from {checkpoint_path}...")
+        checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
+        model.load_state_dict(checkpoint['model'])
+        optimizer.load_state_dict(checkpoint['optimizer'])
+        # advance dataloader to the precise step analytically
+        train_loader.current_pos = (start_step * grad_accum_steps * train_loader.B * train_loader.T) % train_loader.num_tokens
+        print(f"Resuming from step {start_step}! Dataloader synced to pos {train_loader.current_pos}")
+
+    for step in range(start_step, max_steps):
         if (step+1) % 200 == 0:
             model.eval()
             val_loss_accum = 0.0
             val_loss_steps = 200
+            val_correct_accum = 0
+            val_target_accum = 0
             with torch.no_grad():
                 for _ in range(val_loss_steps):
                     x_val, y_val = val_loader.next_batch()
                     x_val, y_val = x_val.to(device), y_val.to(device)
                     with torch.autocast(device, dtype=torch.bfloat16):
-                        _, loss_val = model(x_val, y_val)
+                        logits, loss_val = model(x_val, y_val)
                     val_loss_accum += loss_val.item()
+                    
+                    # Calculate strictly isolated Equation-Level Exact Match accuracy
+                    preds = torch.argmax(logits, dim=-1)
+                    mask = (y_val != -100)
+                    
+                    preds_cpu = preds.cpu().numpy()
+                    y_cpu = y_val.cpu().numpy()
+                    mask_cpu = mask.cpu().numpy()
+                    
+                    for b in range(x_val.size(0)):
+                        in_equation = False
+                        current_equation_correct = True
+                        for t in range(x_val.size(1)):
+                            if mask_cpu[b, t]:
+                                if not in_equation:
+                                    in_equation = True
+                                    current_equation_correct = True
+                                if preds_cpu[b, t] != y_cpu[b, t]:
+                                    current_equation_correct = False
+                            else:
+                                if in_equation:
+                                    in_equation = False
+                                    val_target_accum += 1
+                                    if current_equation_correct:
+                                        val_correct_accum += 1
+                        if in_equation:
+                            val_target_accum += 1
+                            if current_equation_correct:
+                                val_correct_accum += 1
+
             val_loss_accum /= val_loss_steps
+            val_accuracy_pct = (val_correct_accum / val_target_accum) * 100.0 if val_target_accum > 0 else 0.0
             val_perplexity = math.exp(val_loss_accum)
-            print(f"Step {step+1}, Val Loss: {val_loss_accum:.4f}, Val Perplexity: {val_perplexity:.4f}")
+            print(f"Step {step+1}, Val Loss: {val_loss_accum:.4f}, Val Accuracy: {val_accuracy_pct:.2f}%, Val Perplexity: {val_perplexity:.4f}")
             model.train()
 
         t0 = time.time()
@@ -206,10 +249,11 @@ def train_rpn_llm():
             }
             if (step+1) % 200 == 0:
                 log_dict["val_loss"] = val_loss_accum
-                log_dict["val_perplexity"] = val_perplexity 
+                log_dict["val_perplexity"] = val_perplexity
+                log_dict["val_accuracy_pct"] = val_accuracy_pct
             wandb.log(log_dict, step=step+1)
     
-        if (step+1) % 2000 == 0:
+        if (step+1) % 10000 == 0:
             checkpoint = {
                 'model': model.state_dict(),
                 'optimizer': optimizer.state_dict(),
@@ -221,6 +265,14 @@ def train_rpn_llm():
             print(f"Model checkpoint saved to rope25M_reversed_checkpoint_{step}.pt")
    
     wandb.finish()
+    torch.save(checkpoint, f'rope25M_reversed_checkpoint_final.pt')
+    print(f"Model checkpoint saved to rope25M_reversed_checkpoint_final.pt")
 
 if __name__ == "__main__":
-    train_rpn_llm()
+    import sys
+    start_step = 0
+    checkpoint_path = None
+    if len(sys.argv) > 2:
+        start_step = int(sys.argv[1])
+        checkpoint_path = sys.argv[2]
+    train_rpn_llm(start_step, checkpoint_path)

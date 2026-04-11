@@ -274,5 +274,5 @@ def validate_model(checkpoint_path, test_file_path, output_fail_path):
 
 if __name__ == "__main__":
     import sys
-    model_path = sys.argv[1] if len(sys.argv) > 1 else "rope25M_reversed_checkpoint_9999.pt"
-    validate_model(model_path, "data/RPNData-plusminus99999_fully_reversed_nopad-_test.txt", "rope_validation_failures_reversed.txt")
+    model_path = sys.argv[1] if len(sys.argv) > 1 else "rope25M_reversed_checkpoint_final.pt"
+    validate_model(model_path, "data/RPNData-plusminus99999_model_driven_reversals-_test.txt", "results/model_driven_reversals_failures.txt")

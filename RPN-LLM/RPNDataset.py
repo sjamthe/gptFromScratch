@@ -119,8 +119,14 @@ class RPNDataset(Dataset):
             rpn_expr, answer = self._calc_rpn_expr(operands, ops)
             self.examples.append((rpn_expr, answer))
     
+    """
+    Step 1: reverse both numbers in scratchpad. for example "123 45 + = " becomes "<321 54 + = :>"
+    Step 2: perform the operation digit by digit on scratchpad "<321 54 + = : 3 + 5 + 0 = 8 : 2 + 4 + 0 = 6 : 1 + 0 + 0 = 1 :>"
+    Step 3: Add the final result to the scratchpad and reverse it outside a final answer"<321 54 + = : 3 + 5 + 0 = 8 : 2 + 4 + 0 = 6 : 1 + 0 + 0 = 1 : 861 : > 168"
+    Ste 4: Sanity check. Do real calc to check the answer we got before we return the scratchpad and answer
+    """
     def _generate_scratchpad(self, a: int, b: int, op: str) -> str:
-        # Inputs are ALREADY structurally reversed mapping characters
+        # reverse the numbers for the scratchpad    
         a_str, b_str = str(a)[::-1], str(b)[::-1]
         max_len = max(len(a_str), len(b_str))
         
@@ -128,18 +134,32 @@ class RPNDataset(Dataset):
         carry = 0
         
         if op == '+':
+            prefix = f"< {a_str} {b_str} + = :"
+            derived_digits = []
             for i in range(max_len):
                 d_a = int(a_str[i]) if i < len(a_str) else 0
                 d_b = int(b_str[i]) if i < len(b_str) else 0
                 res = d_a + d_b + carry
                 new_carry = res // 10
-                steps.append(f"{d_a} + {d_b} + {carry} = {res}")
+                digit = res % 10
+                steps.append(f"{d_a} + {d_b} + {carry} = {digit}")
+                derived_digits.append(str(digit))
                 carry = new_carry
                 
+            if carry > 0:
+                steps.append(f"0 + 0 + {carry} = {carry}")
+                derived_digits.append(str(carry))
+                
             ans = a + b
-            ans_str = str(ans)[::-1] 
-            scratchpad = " : ".join(steps)
-            return f"< {scratchpad} > {ans_str}"
+            
+            # Sanity check digit aggregation correctly resolves structural bounds matching true answer algorithm!
+            derived_ans_str = "".join(derived_digits)[::-1].lstrip('0') or '0'
+            assert derived_ans_str == str(ans), f"Addition derived structural output {derived_ans_str} != True Math {ans}!"
+
+            ans_rev = str(ans)[::-1]
+            ans_str = str(ans) 
+            scratchpad_math = " : ".join(steps)
+            return f"{prefix} {scratchpad_math} : {ans_rev} : > {ans_str}"
             
         elif op == '-':
             is_negative = a < b
@@ -147,6 +167,9 @@ class RPNDataset(Dataset):
             top_str = b_str if is_negative else a_str
             bot_str = a_str if is_negative else b_str
 
+            prefix = f"< - : {top_str} {bot_str} - = :" if is_negative else f"< {top_str} {bot_str} - = :"
+
+            derived_digits = []
             for i in range(max_len):
                 d_t = int(top_str[i]) if i < len(top_str) else 0
                 d_b = int(bot_str[i]) if i < len(bot_str) else 0
@@ -159,15 +182,20 @@ class RPNDataset(Dataset):
                     new_carry = 0
                     
                 steps.append(f"{d_t} - {d_b} - {carry} = {res}")
+                derived_digits.append(str(res))
                 carry = new_carry
                 
             ans = a - b
-            # Result naturally appends `-` to strings representing mathematically negative strings backwards.
-            ans_str = str(abs(ans))[::-1] + "-" if ans < 0 else str(ans)[::-1]
-            scratchpad = " : ".join(steps)
             
-            prefix = "< - : " if is_negative else "< "
-            return f"{prefix}{scratchpad} > {ans_str}"
+            # Sanity check digits correctly evaluate absolute value arrays gracefully mapping strings!
+            derived_ans_str = "".join(derived_digits)[::-1].lstrip('0') or '0'
+            assert derived_ans_str == str(abs(ans)), f"Subtraction derived structural output {derived_ans_str} != True Math {abs(ans)}!"
+            
+            ans_rev = str(abs(ans))[::-1]
+            ans_str = str(ans)
+            scratchpad_math = " : ".join(steps)
+            
+            return f"{prefix} {scratchpad_math} : {ans_rev} : > {ans_str}"
         else:
             return ""
 
@@ -176,9 +204,20 @@ class RPNDataset(Dataset):
         
         generated_examples = set()
         
+        # Helper to force uniform digit lengths gracefully overcoming population bloat!
+        def get_uniform_length_number(max_num):
+            num_digits = random.randint(1, len(str(max_num)))
+            curr_max = min(max_num, (10 ** num_digits) - 1)
+            curr_min = 0 if num_digits == 1 else (10 ** (num_digits - 1))
+            return random.randint(curr_min, curr_max)
+            
+        def rs():
+            # Inject jitter sequence whitespace randomness (1 to 3 spaces)
+            return " " * random.randint(1, 3)
+        
         while len(self.examples) < num_samples:
-            a = random.randint(0, max_number)
-            b = random.randint(0, max_number)
+            a = get_uniform_length_number(max_number)
+            b = get_uniform_length_number(max_number)
             op = random.choice(operations)
             
             # Skip division by zero
@@ -186,13 +225,12 @@ class RPNDataset(Dataset):
                 continue
                 
             result_str = self._generate_scratchpad(a, b, op)
-            a_rev, b_rev = str(a)[::-1], str(b)[::-1]
-            rpn_expr = f"{a_rev} {b_rev} {op}"
+            rpn_expr = f"{a}{rs()}{b}{rs()}{op}"
             
-            example_key = (rpn_expr, result_str)
-            if example_key not in generated_examples:
-                generated_examples.add(example_key)
-                self.examples.append(example_key)
+            unique_key = f"{a} {b} {op}"
+            if unique_key not in generated_examples:
+                generated_examples.add(unique_key)
+                self.examples.append((rpn_expr, result_str))
                     
 # Example usage:
 from tokenizers import Tokenizer
@@ -200,11 +238,11 @@ from tokenizers import Tokenizer
 if __name__ == "__main__":
 
     max_number = 99999
-    # Tagging Phase 8 fully reversed scale-invariant baseline payload limits natively!
-    file_path_prefix = "data/RPNData-plusminus" + str(max_number) + "_fully_reversed_nopad"
+    # Tagging Phase 9 model-driven scale mapping alignments
+    file_path_prefix = "data/RPNData-plusminus" + str(max_number) + "_model_driven_reversals"
 
     dataset = RPNDataset(
-        num_samples=2000000,
+        num_samples=6000000,
         max_operands=2,
         operations=('+','-',),  # Start with just addition
         max_number=max_number
@@ -226,12 +264,17 @@ if __name__ == "__main__":
 
     for example in dataset:
         rand_num = random.randint(0, 99)
+        def rs(): return " " * random.randint(1, 3)
+        
+        # Add random spaces before and after the `=` sign natively tying formatting limits!
+        eq_str = f"{rs()}={rs()}"
+        
         if rand_num < train_pct:
-            train_f.write(example['rpn'] + " = " + example['answer'] + "\n")
+            train_f.write(example['rpn'] + eq_str + example['answer'] + "\n")
         elif rand_num < train_pct + val_pct:
-            val_f.write(example['rpn'] + " = " + example['answer'] + "\n")
+            val_f.write(example['rpn'] + eq_str + example['answer'] + "\n")
         else:
-            test_f.write(example['rpn'] + " = " + example['answer'] + "\n")
+            test_f.write(example['rpn'] + eq_str + example['answer'] + "\n")
 
     train_f.close()
     val_f.close()
