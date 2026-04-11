@@ -225,12 +225,12 @@ class RPNDataset(Dataset):
                 continue
                 
             result_str = self._generate_scratchpad(a, b, op)
-            rpn_expr = f"{a}{rs()}{b}{rs()}{op}"
+            rpn_expr = f"{rs()}{a}{rs()}{b}{rs()}{op}"
             
-            unique_key = f"{a} {b} {op}"
-            if unique_key not in generated_examples:
-                generated_examples.add(unique_key)
-                self.examples.append((rpn_expr, result_str))
+            # Removed the unique_key constraint. Because 1-digit numbers only have ~200 combinations, 
+            # the unique constraint immediately exhausted them and skipped all future short samples! 
+            # Allowing natural duplicates balances the training loss geometry perfectly across lengths.
+            self.examples.append((rpn_expr, result_str))
                     
 # Example usage:
 from tokenizers import Tokenizer
@@ -239,7 +239,7 @@ if __name__ == "__main__":
 
     max_number = 99999
     # Tagging Phase 9 model-driven scale mapping alignments
-    file_path_prefix = "data/RPNData-plusminus" + str(max_number) + "_model_driven_reversals"
+    file_path_prefix = "RPN-LLM/data/RPNData-plusminus" + str(max_number) + "_model_driven_reversals"
 
     dataset = RPNDataset(
         num_samples=6000000,
@@ -262,14 +262,19 @@ if __name__ == "__main__":
     val_f = open(file_path_prefix + "-_val.txt", 'w', encoding='utf-8')
     test_f = open(file_path_prefix + "-_test.txt", 'w', encoding='utf-8')
 
+    import collections
+    train_length_counts = collections.defaultdict(int)
+
     for example in dataset:
         rand_num = random.randint(0, 99)
         def rs(): return " " * random.randint(1, 3)
         
-        # Add random spaces before and after the `=` sign natively tying formatting limits!
-        eq_str = f"{rs()}={rs()}"
+        # Add random spaces ONLY before the `=` sign so the target deterministic format starts clean!
+        eq_str = f"{rs()}="
         
         if rand_num < train_pct:
+            prompt_str = example['rpn'] + eq_str
+            train_length_counts[len(prompt_str[:prompt_str.find('=')+1])] += 1
             train_f.write(example['rpn'] + eq_str + example['answer'] + "\n")
         elif rand_num < train_pct + val_pct:
             val_f.write(example['rpn'] + eq_str + example['answer'] + "\n")
@@ -281,3 +286,11 @@ if __name__ == "__main__":
     test_f.close()
 
     print("Data saved to files")
+    
+    print("\n--- Training Set Prompt Length Distribution ---")
+    print("Length | Count     | Percentage")
+    total_train_items = sum(train_length_counts.values())
+    for length in sorted(train_length_counts.keys()):
+        count = train_length_counts[length]
+        pct = (count / total_train_items) * 100 if total_train_items > 0 else 0
+        print(f"{length:6d} | {count:<9d} | {pct:.2f}%")

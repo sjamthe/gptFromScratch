@@ -24,7 +24,7 @@ class DataLoaderLite:
     def __init__(self, B, T, input_path):
         self.B = B
         self.T = T
-        tokenizer = RPNTokenizer("rpn-tokenizer.json")
+        tokenizer = RPNTokenizer("RPN-LLM/rpn-tokenizer.json")
         
         if not os.path.exists(input_path):
             raise FileNotFoundError(f"{input_path} not found. Please provide a dataset file.")
@@ -94,8 +94,8 @@ def train_rpn_llm(start_step=0, checkpoint_path=None):
     print(f"Gradient accumulation steps: {grad_accum_steps}")
 
     # Phase 8: Disabling padding completely and explicitly reversing native mapping values.
-    train_dataset = "data/RPNData-plusminus99999_model_driven_reversals-_train.txt"
-    val_dataset = "data/RPNData-plusminus99999_model_driven_reversals-_val.txt"
+    train_dataset = "RPN-LLM/data/RPNData-plusminus99999_model_driven_reversals-_train.txt"
+    val_dataset = "RPN-LLM/data/RPNData-plusminus99999_model_driven_reversals-_val.txt"
     train_loader = DataLoaderLite(B, T, train_dataset)
     val_loader = DataLoaderLite(B, T, val_dataset)
 
@@ -261,12 +261,12 @@ def train_rpn_llm(start_step=0, checkpoint_path=None):
                 'step': step,
                 'train_loader': train_loader,
             }
-            torch.save(checkpoint, f'rope25M_reversed_checkpoint_{step}.pt')
-            print(f"Model checkpoint saved to rope25M_reversed_checkpoint_{step}.pt")
+            torch.save(checkpoint, f'RPN-LLM/rope25M_reversed_checkpoint_{step}.pt')
+            print(f"Model checkpoint saved to RPN-LLM/rope25M_reversed_checkpoint_{step}.pt")
    
     wandb.finish()
-    torch.save(checkpoint, f'rope25M_reversed_checkpoint_final.pt')
-    print(f"Model checkpoint saved to rope25M_reversed_checkpoint_final.pt")
+    torch.save(checkpoint, f'RPN-LLM/rope25M_reversed_checkpoint_final.pt')
+    print(f"Model checkpoint saved to RPN-LLM/rope25M_reversed_checkpoint_final.pt")
 
 if __name__ == "__main__":
     import sys

@@ -108,6 +108,7 @@ def validate_model(checkpoint_path, test_file_path, output_fail_path):
         f.write("--- Real-time Validation Failures ---\n\n")
 
     print("Beginning batched evaluation...")
+    accuracy_by_length = {}
     group_idx = 1
     for length, items in length_groups.items():
         print(f"\n--- Evaluating group {group_idx}/{len(length_groups)} (prompt length {length}) - {len(items)} items ---")
@@ -203,7 +204,7 @@ def validate_model(checkpoint_path, test_file_path, output_fail_path):
                     is_zero = (int(parts[0]) == 0 or int(parts[1]) == 0)
                     carries = calculate_carries(parts[0], parts[1], parts[2])
                     
-                is_neg = expected_ans_str.endswith('-')
+                is_neg = expected_ans_str.startswith('-')
                 is_normal = not is_zero and not is_neg
                 
                 total_by_carry[carries] += 1
@@ -230,7 +231,8 @@ def validate_model(checkpoint_path, test_file_path, output_fail_path):
             # print accuracy
             accuracy = (total_correct / total_processed) * 100
             group_accuracy = (group_total_correct / group_total_processed) * 100
-            print(f"Progress: {total_processed}/{total_items} ({pct_complete:.2f}%) | Accuracy: {accuracy:.2f}% | Group Accuracy: {group_accuracy:.2f}% | Batch inference time: {batch_time:.2f}s | Tokens/sec: {tokens_per_sec:.1f}")
+            accuracy_by_length[length] = group_accuracy
+            print(f"Progress: {total_processed}/{total_items} ({pct_complete:.2f}%) | Accuracy: {accuracy:.2f}% | Group Accuracy{group_idx}: {group_accuracy:.2f}% | Batch inference time: {batch_time:.2f}s | Tokens/sec: {tokens_per_sec:.1f}")
 
     # 5. Output Results
     accuracy = (total_correct / total_processed) * 100
@@ -244,6 +246,12 @@ def validate_model(checkpoint_path, test_file_path, output_fail_path):
     with open(output_fail_path, "a", encoding="utf-8") as f:
         f.write(f"\nValidation Accuracy: {accuracy:.2f}% ({total_correct}/{total_processed})\n")
         f.write("=========================================\n\n")
+
+        f.write("\n--- Breakdown by Prompt Length ---\n")
+        f.write("Token Length | Total Items | Accuracy\n")
+        for g in sorted(accuracy_by_length.keys()):
+            stats = f"{g:2d} | {len(length_groups[g]):<10} | {accuracy_by_length[g]:.2f}%"
+            f.write(stats + "\n")
             
         f.write("\n--- Breakdown by Carry Operations ---\n")
         f.write("Carries | Total   | Correct | Failures | Accuracy\n")

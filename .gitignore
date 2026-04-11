@@ -13,3 +13,4 @@ wandb/
 .DS_Store
 data/
 results/
+RPN-LLM/test_tok.py
