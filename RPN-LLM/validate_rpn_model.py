@@ -49,7 +49,7 @@ def validate_model(checkpoint_path, test_file_path, output_fail_path):
     model.to(device)
     model.eval()
 
-    tokenizer = RPNTokenizer("rpn-tokenizer.json")
+    tokenizer = RPNTokenizer("RPN-LLM/rpn-tokenizer.json")
     
     # 2. Parse Test File
     print(f"Parsing test file {test_file_path}...")
@@ -67,28 +67,21 @@ def validate_model(checkpoint_path, test_file_path, output_fail_path):
         if "=" not in line:
             continue
         
-        # Tokenize the entire line at once exactly as training does
-        line_tokens = tokenizer.encode(line)
-        
         # Find index of '='
         try:
-            eq_idx = line_tokens.index(eq_id)
+            eq_idx = line.index("=")
         except ValueError:
             continue
             
-        prompt_tokens = line_tokens[:eq_idx + 1]
-        expected_ans_tokens = line_tokens[eq_idx + 1:]
+        length_groups[eq_idx + 1].append(line.strip())
         
-        length_groups[len(prompt_tokens)].append({
-            'prompt_tokens': prompt_tokens,
-            'expected_tokens': expected_ans_tokens,
-            'full_str': line.strip()
-        })
-        
+    # free lines memory
+    del lines
+    
     print(f"Grouped into {len(length_groups)} different prompt lengths.")
     
     # 4. Batched Generation
-    max_batch_size = 32 # Dropped surgically to prevent Apple MPS fragmenting the KV Cache memory allocation bounds!
+    max_batch_size = 256 # Dropped surgically to prevent Apple MPS fragmenting the KV Cache memory allocation bounds!
     failures = []
     total_processed = 0
     total_correct = 0
@@ -118,6 +111,8 @@ def validate_model(checkpoint_path, test_file_path, output_fail_path):
     group_idx = 1
     for length, items in length_groups.items():
         print(f"\n--- Evaluating group {group_idx}/{len(length_groups)} (prompt length {length}) - {len(items)} items ---")
+        group_total_processed = 0
+        group_total_correct = 0
         group_idx += 1
         
         # Process in chunks of max_batch_size
@@ -125,8 +120,21 @@ def validate_model(checkpoint_path, test_file_path, output_fail_path):
             batch_items = items[i:i+max_batch_size]
             B = len(batch_items)
             
+            batch_prompt_tokens = []
+            expected_strs = []
+            prompt_strs = []
+            
+            for line_str in batch_items:
+                line_tokens = tokenizer.encode(line_str)
+                eq_idx = line_tokens.index(eq_id)
+                prompt_tokens = line_tokens[:eq_idx + 1]
+                
+                batch_prompt_tokens.append(prompt_tokens)
+                prompt_strs.append(tokenizer.decode(prompt_tokens).strip())
+                expected_strs.append(line_str.split('=', 1)[1].strip())
+            
             # Construct (B, L) tensor natively (no padding required because all logic lengths identically match)
-            prompts = torch.tensor([item['prompt_tokens'] for item in batch_items], dtype=torch.long, device=device)
+            prompts = torch.tensor(batch_prompt_tokens, dtype=torch.long, device=device)
             
             # Generate max_new_tokens sequentially using Argmax
             idx = prompts
@@ -157,6 +165,7 @@ def validate_model(checkpoint_path, test_file_path, output_fail_path):
             tokens_per_sec = (B * max_new_tokens) / batch_time if batch_time > 0 else 0
             
             total_processed += B
+            group_total_processed += B
             pct_complete = (total_processed / total_items) * 100
                             
             # Extract and verify the generated characters
@@ -170,10 +179,9 @@ def validate_model(checkpoint_path, test_file_path, output_fail_path):
                     gen_answer_tokens = gen_answer_tokens[:nl_idx+1]
                 
                 # Compare
-                expected = batch_items[b]['expected_tokens']
-                expected_str = tokenizer.decode(expected).strip()
+                expected_str = expected_strs[b]
                 predicted_str = tokenizer.decode(gen_answer_tokens).strip() 
-                prompt_str = tokenizer.decode(batch_items[b]['prompt_tokens']).strip()
+                prompt_str = prompt_strs[b]
                 
                 expected_ans_str = expected_str.split('>')[-1].strip() if '>' in expected_str else expected_str
                 predicted_ans_str = predicted_str.split('>')[-1].strip() if '>' in predicted_str else predicted_str
@@ -187,18 +195,15 @@ def validate_model(checkpoint_path, test_file_path, output_fail_path):
                     if s.startswith("-"):
                         return "-" + s[1:][::-1]
                     return s[::-1]
-                
-                expected_ans_flipped = flip_ans(expected_ans_str)
-                predicted_ans_flipped = flip_ans(predicted_ans_str)
-                
-                parts = prompt_str.split(' ')
+                                
+                parts = prompt_str.split()
                 carries = 0
                 is_zero = False
                 if len(parts) >= 3:
                     is_zero = (int(parts[0]) == 0 or int(parts[1]) == 0)
                     carries = calculate_carries(parts[0], parts[1], parts[2])
                     
-                is_neg = expected_ans_flipped.startswith('-')
+                is_neg = expected_ans_str.endswith('-')
                 is_normal = not is_zero and not is_neg
                 
                 total_by_carry[carries] += 1
@@ -209,13 +214,14 @@ def validate_model(checkpoint_path, test_file_path, output_fail_path):
                 # Check absolute truth of final numerical output!
                 if expected_ans_str != predicted_ans_str:
                     # Document failure
-                    fail_str = f"Q: {prompt_str} | Expected: {expected_ans_flipped} | Predicted: {predicted_ans_flipped} | Full Pred: {predicted_str}"
+                    fail_str = f"Q: {prompt_str} | Expected: {expected_ans_str} | Predicted: {predicted_ans_str} | Full Expected: {expected_str} | Full Pred: {predicted_str}"
                     failures.append(fail_str)
                     # Stream directly to disk live!
                     with open(output_fail_path, "a", encoding="utf-8") as f:
                         f.write(fail_str + "\n")
                 else:
                     total_correct += 1
+                    group_total_correct += 1
                     correct_by_carry[carries] += 1
                     if is_zero: edge_stats['zero_operand']['correct'] += 1
                     if is_neg: edge_stats['negative_result']['correct'] += 1
@@ -223,7 +229,8 @@ def validate_model(checkpoint_path, test_file_path, output_fail_path):
 
             # print accuracy
             accuracy = (total_correct / total_processed) * 100
-            print(f"Progress: {total_processed}/{total_items} ({pct_complete:.2f}%) | Accuracy: {accuracy:.2f}% | Batch inference time: {batch_time:.2f}s | Tokens/sec: {tokens_per_sec:.1f}")
+            group_accuracy = (group_total_correct / group_total_processed) * 100
+            print(f"Progress: {total_processed}/{total_items} ({pct_complete:.2f}%) | Accuracy: {accuracy:.2f}% | Group Accuracy: {group_accuracy:.2f}% | Batch inference time: {batch_time:.2f}s | Tokens/sec: {tokens_per_sec:.1f}")
 
     # 5. Output Results
     accuracy = (total_correct / total_processed) * 100
@@ -274,5 +281,5 @@ def validate_model(checkpoint_path, test_file_path, output_fail_path):
 
 if __name__ == "__main__":
     import sys
-    model_path = sys.argv[1] if len(sys.argv) > 1 else "rope25M_reversed_checkpoint_final.pt"
-    validate_model(model_path, "data/RPNData-plusminus99999_model_driven_reversals-_test.txt", "results/model_driven_reversals_failures.txt")
+    model_path = sys.argv[1] if len(sys.argv) > 1 else "RPN-LLM/rope25M_reversed_checkpoint_final.pt"
+    validate_model(model_path, "RPN-LLM/data/RPNData-plusminus99999_model_driven_reversals-_test.txt", "RPN-LLM/results/model_driven_reversals_failures.txt")
