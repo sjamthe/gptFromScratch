@@ -15,13 +15,12 @@ class RPNTokenizer:
         sorted_tokens = sorted(self.vocab.keys(), key=len, reverse=True)
         # We escape the tokens (in case they have regex chars like '[' or '+') 
         # and add '|.' at the end to catch any remaining single characters.
-        self.token_pattern = re.compile("|".join(re.escape(t) for t in sorted_tokens) + "|.")
+        self.token_pattern = re.compile("|".join(re.escape(t) for t in sorted_tokens) + r"|[\s\S]")
 
     def encode(self, text):
         # findall captures all matched tokens/characters sequentially
         tokens = self.token_pattern.findall(text)
-        # Filter out empty matches if any, and handle unknowns
-        return [self.vocab.get(t, self.vocab.get("[UNK]", 1)) for t in tokens if t.strip() or t == ' ']
+        return [self.vocab.get(t, self.vocab.get("[UNK]", 1)) for t in tokens]
 
     def decode(self, tokens):
         return "".join([self.inverse_vocab.get(t, "") for t in tokens])
