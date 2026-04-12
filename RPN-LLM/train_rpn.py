@@ -5,6 +5,7 @@ import math
 import torch
 import wandb
 
+import sys
 from model_rope import GPT, GPTConfig
 
 class RPNTokenizer:
@@ -74,6 +75,75 @@ class DataLoaderLite:
         
         self.current_pos += B * T
         return x, y
+
+def run_validation(model, val_loader, device, step):
+    tokenizer = RPNTokenizer("RPN-LLM/rpn-tokenizer.json")
+    gt_id  = tokenizer.encode(">")[0]
+    unk_id = tokenizer.encode("[UNK]")[0]
+    nl_id = tokenizer.encode("\n")[0]
+
+    model.eval()
+    val_loss_accum = 0.0
+    val_loss_steps = 200
+    val_correct_accum = 0
+    val_target_accum = 0
+    with torch.no_grad():
+        for _ in range(val_loss_steps):
+            x_val, y_val = val_loader.next_batch()
+            x_val, y_val = x_val.to(device), y_val.to(device)
+            with torch.autocast(device, dtype=torch.bfloat16):
+                logits, loss_val = model(x_val, y_val)
+            val_loss_accum += loss_val.item()
+            
+            # Calculate strictly isolated Equation-Level Exact Match accuracy
+            preds = torch.argmax(logits, dim=-1)
+            preds_cpu = preds.cpu().numpy()
+            y_cpu = y_val.cpu().numpy()
+            
+            for b in range(y_val.size(0)):
+                # Find '>' in ground truth (y_val)
+                gt_pos_y = None
+                for t in range(y_val.shape[1]):
+                    if y_val[b, t].item() == gt_id:
+                        gt_pos_y = t
+                        break
+
+                if gt_pos_y is None:
+                    continue  # malformed or split sequence, skip
+
+                # In Teacher Forcing, predictions and targets are strictly time-aligned!
+                # We only need to check if the model perfectly predicted the true next tokens 
+                # after the true '>' occurred in the context window.
+                offset = gt_pos_y + 1
+                
+                equation_correct = True
+                token_count = 0
+
+                while offset < y_val.shape[1]:
+                    tok_y = y_cpu[b, offset]
+                    tok_p = preds_cpu[b, offset]
+
+                    # Stop if we hit \n (or [UNK]) in the ground truth sequence
+                    if tok_y in (unk_id, nl_id):
+                        break
+
+                    if tok_y != tok_p:
+                        equation_correct = False
+
+                    token_count += 1
+                    offset += 1
+
+                if token_count > 0:
+                    val_target_accum += 1.0
+                    if equation_correct:
+                        val_correct_accum += 1.0
+
+    val_loss_accum /= val_loss_steps
+    val_accuracy_pct = (val_correct_accum / val_target_accum) * 100.0 if val_target_accum > 0 else 0.0
+    val_perplexity = math.exp(val_loss_accum)
+    print(f"Step {step+1}, Val Loss: {val_loss_accum:.4f}, Val Accuracy: {val_accuracy_pct:.2f}%, Val Perplexity: {val_perplexity:.4f}")
+    model.train()
+    return val_loss_accum,val_perplexity,val_accuracy_pct 
 
 def train_rpn_llm(start_step=0, checkpoint_path=None):
     device = 'cuda' if torch.cuda.is_available() else 'mps' if torch.backends.mps.is_available() else 'cpu'
@@ -161,55 +231,6 @@ def train_rpn_llm(start_step=0, checkpoint_path=None):
         print(f"Resuming from step {start_step}! Dataloader synced to pos {train_loader.current_pos}")
 
     for step in range(start_step, max_steps):
-        if (step+1) % 200 == 0:
-            model.eval()
-            val_loss_accum = 0.0
-            val_loss_steps = 200
-            val_correct_accum = 0
-            val_target_accum = 0
-            with torch.no_grad():
-                for _ in range(val_loss_steps):
-                    x_val, y_val = val_loader.next_batch()
-                    x_val, y_val = x_val.to(device), y_val.to(device)
-                    with torch.autocast(device, dtype=torch.bfloat16):
-                        logits, loss_val = model(x_val, y_val)
-                    val_loss_accum += loss_val.item()
-                    
-                    # Calculate strictly isolated Equation-Level Exact Match accuracy
-                    preds = torch.argmax(logits, dim=-1)
-                    mask = (y_val != -100)
-                    
-                    preds_cpu = preds.cpu().numpy()
-                    y_cpu = y_val.cpu().numpy()
-                    mask_cpu = mask.cpu().numpy()
-                    
-                    for b in range(x_val.size(0)):
-                        in_equation = False
-                        current_equation_correct = True
-                        for t in range(x_val.size(1)):
-                            if mask_cpu[b, t]:
-                                if not in_equation:
-                                    in_equation = True
-                                    current_equation_correct = True
-                                if preds_cpu[b, t] != y_cpu[b, t]:
-                                    current_equation_correct = False
-                            else:
-                                if in_equation:
-                                    in_equation = False
-                                    val_target_accum += 1
-                                    if current_equation_correct:
-                                        val_correct_accum += 1
-                        if in_equation:
-                            val_target_accum += 1
-                            if current_equation_correct:
-                                val_correct_accum += 1
-
-            val_loss_accum /= val_loss_steps
-            val_accuracy_pct = (val_correct_accum / val_target_accum) * 100.0 if val_target_accum > 0 else 0.0
-            val_perplexity = math.exp(val_loss_accum)
-            print(f"Step {step+1}, Val Loss: {val_loss_accum:.4f}, Val Accuracy: {val_accuracy_pct:.2f}%, Val Perplexity: {val_perplexity:.4f}")
-            model.train()
-
         t0 = time.time()
         optimizer.zero_grad()
         loss_accum = 0
@@ -238,7 +259,10 @@ def train_rpn_llm(start_step=0, checkpoint_path=None):
         tokens_per_sec = grad_accum_steps * train_loader.B * train_loader.T / (t1 - t0)
         if (step+1) % 50 == 0:
             print(f"Step {step+1}, Loss: {loss_accum.item():.4f}, lr: {lr:.4e}, norm: {norm:.4f}, Time: {dt:.2f}ms, Tokens per second: {tokens_per_sec:.2f}")
-        
+
+        if (step+1) % 200 == 0:
+            val_loss_accum,val_perplexity,val_accuracy_pct = run_validation(model, val_loader, device, step)
+       
         if (step+1) % 10 == 0:
             log_dict = {
                 "loss": loss_accum.item(),
