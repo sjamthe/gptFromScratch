@@ -164,8 +164,8 @@ def train_rpn_llm(start_step=0, checkpoint_path=None):
     print(f"Gradient accumulation steps: {grad_accum_steps}")
 
     # Phase 8: Disabling padding completely and explicitly reversing native mapping values.
-    train_dataset = "RPN-LLM/data/RPNData-plusminus99999_model_driven_reversals-_train.txt"
-    val_dataset = "RPN-LLM/data/RPNData-plusminus99999_model_driven_reversals-_val.txt"
+    train_dataset = "RPN-LLM/data/RPNData-plusminus99999_tens_complement-_train.txt"
+    val_dataset = "RPN-LLM/data/RPNData-plusminus99999_tens_complement-_val.txt"
     train_loader = DataLoaderLite(B, T, train_dataset)
     val_loader = DataLoaderLite(B, T, val_dataset)
 

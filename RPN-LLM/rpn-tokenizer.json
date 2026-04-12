@@ -65,6 +65,24 @@
       "rstrip": false,
       "normalized": false,
       "special": true
+    },
+    {
+      "id": 7,
+      "content": "[BORROW]",
+      "single_word": false,
+      "lstrip": false,
+      "rstrip": false,
+      "normalized": false,
+      "special": true
+    },
+    {
+      "id": 8,
+      "content": "[PASS]",
+      "single_word": false,
+      "lstrip": false,
+      "rstrip": false,
+      "normalized": false,
+      "special": true
     }
   ],
   "normalizer": null,
@@ -90,6 +108,8 @@
       "[CLS]": 4,
       "[SEP]": 5,
       "[MASK]": 6,
+      "[BORROW]": 7,
+      "[PASS]": 8,
       "0": 10,
       "1": 11,
       "2": 12,

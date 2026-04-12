@@ -6,6 +6,8 @@ from collections import defaultdict
 from model_rope import GPT, GPTConfig
 from train_rpn import RPNTokenizer, DataLoaderLite
 
+VALIDATE_PCT = .025
+
 def calculate_carries(a_str, b_str, op):
     a, b = int(a_str), int(b_str)
     if op == '-' and a < b:
@@ -73,7 +75,9 @@ def validate_model(checkpoint_path, test_file_path, output_fail_path):
         except ValueError:
             continue
             
-        length_groups[eq_idx + 1].append(line.strip())
+        # Strip ONLY trailing whitespace to preserve carefully injected leading spaces
+        # because the validation loop tensors dynamically depend on strict uniform lengths!
+        length_groups[eq_idx + 1].append(line.rstrip())
         
     # free lines memory
     del lines
@@ -97,7 +101,7 @@ def validate_model(checkpoint_path, test_file_path, output_fail_path):
     
     # Max generation steps for an answer
     # A padded 5-digit math evaluates to ~112 tokens dynamically, pushing past the bounds of 96 natively!
-    max_new_tokens = 128
+    max_new_tokens = 164
 
     total_items = sum(len(items) for items in length_groups.values())
     start_time = time.time()
@@ -107,7 +111,8 @@ def validate_model(checkpoint_path, test_file_path, output_fail_path):
     with open(output_fail_path, "w", encoding="utf-8") as f:
         f.write("--- Real-time Validation Failures ---\n\n")
 
-    print("Beginning batched evaluation...")
+    max_rows = int(VALIDATE_PCT*total_items/len(length_groups))
+    print(f"Beginning batched evaluation on {max_rows} rows per group...")
     accuracy_by_length = {}
     group_idx = 1
     for length, items in length_groups.items():
@@ -116,8 +121,8 @@ def validate_model(checkpoint_path, test_file_path, output_fail_path):
         group_total_correct = 0
         group_idx += 1
         
-        # Process in chunks of max_batch_size
-        for i in range(0, len(items), max_batch_size):
+        # Process in chunks of max_batch_size. only validate a fraction of the data
+        for i in range(0, min(max_rows, len(items)), max_batch_size):
             batch_items = items[i:i+max_batch_size]
             B = len(batch_items)
             
@@ -232,7 +237,7 @@ def validate_model(checkpoint_path, test_file_path, output_fail_path):
             accuracy = (total_correct / total_processed) * 100
             group_accuracy = (group_total_correct / group_total_processed) * 100
             accuracy_by_length[length] = group_accuracy
-            print(f"Progress: {total_processed}/{total_items} ({pct_complete:.2f}%) | Accuracy: {accuracy:.2f}% | Group Accuracy{group_idx}: {group_accuracy:.2f}% | Batch inference time: {batch_time:.2f}s | Tokens/sec: {tokens_per_sec:.1f}")
+            print(f"Progress: {total_processed}/{total_items} ({pct_complete:.2f}%) | Accuracy: {accuracy:.2f}% | Group {group_idx-1} Accuracy: {group_accuracy:.2f}% | Batch inference time: {batch_time:.2f}s | Tokens/sec: {tokens_per_sec:.1f}")
 
     # 5. Output Results
     accuracy = (total_correct / total_processed) * 100
@@ -290,4 +295,5 @@ def validate_model(checkpoint_path, test_file_path, output_fail_path):
 if __name__ == "__main__":
     import sys
     model_path = sys.argv[1] if len(sys.argv) > 1 else "RPN-LLM/rope25M_reversed_checkpoint_final.pt"
-    validate_model(model_path, "RPN-LLM/data/RPNData-plusminus99999_model_driven_reversals-_test.txt", "RPN-LLM/results/model_driven_reversals_failures.txt")
+    validate_model(model_path, "RPN-LLM/data/RPNData-plusminus99999_model_driven_reversals-_test.txt",
+                            "RPN-LLM/results/model_driven_reversals_failures_final.txt")

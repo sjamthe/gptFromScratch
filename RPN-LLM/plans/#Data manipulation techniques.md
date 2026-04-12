@@ -26,8 +26,35 @@ Rewrite the expression in reverse in the dataset and show in scratchpad \<scratc
 ** Summary:** Model probably has less data for lengths 12-14 so couldn't learn. sensitive to position even with ROPE.
 
 ## model_driven_reversals
-The above technique reversed the input data. This technique builds on it and puts reversal inside scratchpad. input expression is as user entered.
-We also add random spaces between numbers, operators and equals sign. This is so that model doesn't learn exact positions. The dataset was recreated with better distribution of numbers which was problem above resulting in 85% data with 15 tokens.
+The above technique (fully_reversed_nopad) reversed the input data. This technique builds on it and puts reversal inside scratchpad. input expression is as user entered.
+We also add random spaces between numbers, operators and equals sign. This is done so model doesn't learn exact positions of =. The dataset was recreated with better distribution of numbers which was a problem in previous technique (fully_reversed_nopad) where 85% data had 15 tokens.
 
+### Results (total test rows 15,922)
+**Total Accuracy: 95.87% (15265/15922)**
+- 94% failures are due to eager start of incorrect scratchpad (missing < and reverse numbers)
 
- 
+<pre>
+--- Breakdown by Prompt Length ---
+Token Length | Total Items | Accuracy
+ 8 | 281        | 81.85%
+ 9 | 1806       | 70.02%
+10 | 6286       | 89.65%
+11 | 15261      | 94.43%
+12 | 30085      | 95.02%
+13 | 49125      | 97.66%
+14 | 68967      | 98.54%
+15 | 83385      | 99.32%
+16 | 89193      | 98.93%
+17 | 83404      | 99.90%
+18 | 68545      | 99.90%
+19 | 49047      | 100.00%
+20 | 30118      | 99.22%
+21 | 15334      | 99.80%
+22 | 6284       | 99.32%
+23 | 1772       | 99.51%
+24 | 281        | 98.58%
+</pre>
+
+ ## Ten's complement two pass subtraction
+ This plan rewrites the generated subtraction format in RPNDataset.py to completely eradicate the zero-shot $A < B$ global sign prediction. The model will now blindly evaluate $A - B$ right to left cleanly taking borrows, and run a fast local 10s-complement correction string on the output if the final sequence borrow is 1.
+ The addition is same as model driven reversals.

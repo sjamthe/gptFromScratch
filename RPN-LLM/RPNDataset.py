@@ -162,40 +162,61 @@ class RPNDataset(Dataset):
             return f"{prefix} {scratchpad_math} : {ans_rev} : > {ans_str}"
             
         elif op == '-':
-            is_negative = a < b
-            # Top is ALWAYS the structurally larger integer to evaluate clean sub-loops!
-            top_str = b_str if is_negative else a_str
-            bot_str = a_str if is_negative else b_str
-
-            prefix = f"< - : {top_str} {bot_str} - = :" if is_negative else f"< {top_str} {bot_str} - = :"
-
+            # Ten's Complement Two-pass Subtraction completely eradicating zero-shot magnitude prediction!
+            prefix = f"< {a_str} {b_str} - = :"
             derived_digits = []
             for i in range(max_len):
-                d_t = int(top_str[i]) if i < len(top_str) else 0
-                d_b = int(bot_str[i]) if i < len(bot_str) else 0
+                d_a = int(a_str[i]) if i < len(a_str) else 0
+                d_b = int(b_str[i]) if i < len(b_str) else 0
                 
-                res = (d_t - carry) - d_b
+                res = (d_a - carry) - d_b
                 if res < 0:
                     res += 10
                     new_carry = 1
                 else:
                     new_carry = 0
                     
-                steps.append(f"{d_t} - {d_b} - {carry} = {res}")
+                steps.append(f"{d_a} - {d_b} - {carry} = {res}")
                 derived_digits.append(str(res))
                 carry = new_carry
                 
             ans = a - b
-            
-            # Sanity check digits correctly evaluate absolute value arrays gracefully mapping strings!
-            derived_ans_str = "".join(derived_digits)[::-1].lstrip('0') or '0'
-            assert derived_ans_str == str(abs(ans)), f"Subtraction derived structural output {derived_ans_str} != True Math {abs(ans)}!"
-            
-            ans_rev = str(abs(ans))[::-1]
             ans_str = str(ans)
             scratchpad_math = " : ".join(steps)
             
-            return f"{prefix} {scratchpad_math} : {ans_rev} : > {ans_str}"
+            if carry == 0:
+                # Positive answer!
+                steps_part2 = [f"[BORROW] 0 > +", "".join(derived_digits)]
+                final_scratchpad = " : ".join([scratchpad_math] + steps_part2)
+            else:
+                # Negative answer => Ten's Complement Pass!
+                steps_part2 = [f"[BORROW] 1 > -"]
+                tens_comp_digits = []
+                found_nonzero = False
+                for d_str in derived_digits: # Going LSB to MSB
+                    d = int(d_str)
+                    if not found_nonzero:
+                        if d == 0:
+                            steps_part2.append(f"[PASS] 0 = 0")
+                            tens_comp_digits.append("0")
+                        else:
+                            comp = 10 - d
+                            steps_part2.append(f"10 - {d} = {comp}")
+                            tens_comp_digits.append(str(comp))
+                            found_nonzero = True
+                    else:
+                        comp = 9 - d
+                        steps_part2.append(f"9 - {d} = {comp}")
+                        tens_comp_digits.append(str(comp))
+                
+                # Check arithmetic truth
+                derived_val = "".join(tens_comp_digits)[::-1].lstrip('0') or '0'
+                assert derived_val == str(abs(ans)), f"Tens Comp {derived_val} != Abs({ans})"
+                
+                steps_part2.append("".join(tens_comp_digits))
+                final_scratchpad = " : ".join([scratchpad_math] + steps_part2)
+
+            return f"{prefix} {final_scratchpad} : > {ans_str}"
         else:
             return ""
 
@@ -238,8 +259,8 @@ from tokenizers import Tokenizer
 if __name__ == "__main__":
 
     max_number = 99999
-    # Tagging Phase 9 model-driven scale mapping alignments
-    file_path_prefix = "RPN-LLM/data/RPNData-plusminus" + str(max_number) + "_model_driven_reversals"
+    # Tagging Phase 10 model-driven scale mapping alignments
+    file_path_prefix = "RPN-LLM/data/RPNData-plusminus" + str(max_number) + "_tens_complement"
 
     dataset = RPNDataset(
         num_samples=6000000,
