@@ -9,7 +9,7 @@ import sys
 from model_rope import GPT, GPTConfig
 from utils import RPNTokenizer, DataLoaderLite
 
-def run_validation(model, val_loader, device, step):
+def run_teacher_forcing_validation(model, val_loader, device, step):
     tokenizer = RPNTokenizer("rpn_llm/rpn-tokenizer.json")
     gt_id  = tokenizer.encode(">")[0]
     unk_id = tokenizer.encode("[UNK]")[0]
@@ -28,14 +28,13 @@ def run_validation(model, val_loader, device, step):
                 logits, loss_val = model(x_val, y_val)
             val_loss_accum += loss_val.item()
             
-            # Calculate strictly isolated Equation-Level Exact Match accuracy
+            # Calculate strictly isolated Equation-Level Exact Match accuracy (Teacher Forcing)
             preds = torch.argmax(logits, dim=-1)
             preds_cpu = preds.cpu().numpy()
             y_cpu = y_val.cpu().numpy()
             
             for b in range(y_val.size(0)):
                 # Find the LAST '>' in ground truth (y_val) to isolate the final answer
-                # especially important for subtraction with internal borrow markers.
                 gt_pos_y = None
                 for t in range(y_val.shape[1] - 1, -1, -1):
                     if y_val[b, t].item() == gt_id:
@@ -45,11 +44,7 @@ def run_validation(model, val_loader, device, step):
                 if gt_pos_y is None:
                     continue  # malformed or split sequence, skip
 
-                # In Teacher Forcing, predictions and targets are strictly time-aligned!
-                # We only need to check if the model perfectly predicted the true next tokens 
-                # after the true '>' occurred in the context window.
                 offset = gt_pos_y + 1
-                
                 equation_correct = True
                 token_count = 0
 
@@ -57,13 +52,10 @@ def run_validation(model, val_loader, device, step):
                     tok_y = y_cpu[b, offset]
                     tok_p = preds_cpu[b, offset]
 
-                    # Stop if we hit \n (or [UNK]) in the ground truth sequence
                     if tok_y in (unk_id, nl_id):
                         break
-
                     if tok_y != tok_p:
                         equation_correct = False
-
                     token_count += 1
                     offset += 1
 
@@ -75,9 +67,92 @@ def run_validation(model, val_loader, device, step):
     val_loss_accum /= val_loss_steps
     val_accuracy_pct = (val_correct_accum / val_target_accum) * 100.0 if val_target_accum > 0 else 0.0
     val_perplexity = math.exp(val_loss_accum)
-    print(f"Step {step+1}, Val Loss: {val_loss_accum:.4f}, Val Accuracy: {val_accuracy_pct:.2f}%, Val Perplexity: {val_perplexity:.4f}")
+    print(f"Step {step+1}, Val Loss: {val_loss_accum:.4f}, Val TF Acc: {val_accuracy_pct:.2f}%, Val Perplexity: {val_perplexity:.4f}")
     model.train()
-    return val_loss_accum,val_perplexity,val_accuracy_pct 
+    return val_loss_accum, val_perplexity, val_accuracy_pct
+
+def run_generation_validation(model, val_loader, device, step, num_batches=4):
+    """
+    Performs real auto-regressive generation to measure TRUE accuracy.
+    This is slower, so we only run it on a few batches.
+    """
+    tokenizer = RPNTokenizer("rpn_llm/rpn-tokenizer.json")
+    eq_id = tokenizer.encode("=")[0]
+    gt_id = tokenizer.encode(">")[0]
+    nl_id = tokenizer.encode("\n")[0]
+    
+    model.eval()
+    total_correct = 0
+    total_equations = 0
+    max_new_tokens = 256
+    
+    with torch.no_grad():
+        for _ in range(num_batches):
+            x_val, y_val = val_loader.next_batch()
+            batch_size = x_val.size(0)
+            
+            for b in range(batch_size):
+                # Since the stream is packed, find the first '=' in this sequence
+                row_x = x_val[b].tolist()
+                row_y = y_val[b].tolist()
+                
+                try:
+                    eq_pos = row_x.index(eq_id)
+                except ValueError:
+                    continue # No prompt start in this slice
+                
+                # The prompt is everything up to '='
+                prompt_tokens = torch.tensor(row_x[:eq_pos+1], dtype=torch.long, device=device).unsqueeze(0)
+                
+                # Find the target answer in the ground truth
+                # We need to find the newline AFTER this eq_pos
+                try:
+                    # In y_val, the first token is x_val[1], so eq_pos in x is eq_pos-1 in y if we align.
+                    # Actually, y_val is just x_val shifted. y[eq_pos] is the token after x[eq_pos].
+                    targets_shifted = row_y[eq_pos:]
+                    nl_pos_in_targets = targets_shifted.index(nl_id)
+                    full_target_seq = targets_shifted[:nl_pos_in_targets]
+                except ValueError:
+                    continue # Equation truncated by sequence end
+                
+                # Extract the expected final answer (after last >)
+                target_str = tokenizer.decode(full_target_seq)
+                if ">" not in target_str:
+                    continue
+                expected_answer = target_str.split(">")[-1].strip()
+                
+                # --- GENERATION ---
+                idx = prompt_tokens
+                past_kv = None
+                generated_tokens = []
+                
+                for _ in range(max_new_tokens):
+                    idx_cond = idx[:, -1:] if past_kv is not None else idx
+                    with torch.autocast(device, dtype=torch.bfloat16):
+                        logits, _, past_kv = model(idx_cond, use_cache=True, past_key_values=past_kv)
+                    
+                    logits = logits[:, -1, :]
+                    idx_next = torch.argmax(logits, dim=-1, keepdim=True)
+                    next_id = idx_next.item()
+                    
+                    if next_id == nl_id:
+                        break
+                    
+                    generated_tokens.append(next_id)
+                    idx = torch.cat((idx, idx_next), dim=1)
+                
+                # --- EVALUATION ---
+                pred_str = tokenizer.decode(generated_tokens)
+                pred_answer = pred_str.split(">")[-1].strip() if ">" in pred_str else "N/A"
+                
+                if pred_answer == expected_answer:
+                    total_correct += 1
+                total_equations += 1
+
+    gen_accuracy_pct = (total_correct / total_equations) * 100.0 if total_equations > 0 else 0.0
+    print(f"Step {step+1}, True Gen Accuracy: {gen_accuracy_pct:.2f}% ({total_correct}/{total_equations})")
+    model.train()
+    return gen_accuracy_pct
 
 def train_rpn_llm(start_step=0, checkpoint_path=None):
     device = 'cuda' if torch.cuda.is_available() else 'mps' if torch.backends.mps.is_available() else 'cpu'
@@ -191,11 +266,13 @@ def train_rpn_llm(start_step=0, checkpoint_path=None):
         t1 = time.time()
         dt = (t1 - t0)*1000 # ms
         tokens_per_sec = grad_accum_steps * train_loader.B * train_loader.T / (t1 - t0)
-        if (step+1) % 50 == 0:
+        if (step+1) % 100 == 0:
             print(f"Step {step+1}, Loss: {loss_accum.item():.4f}, lr: {lr:.4e}, norm: {norm:.4f}, Time: {dt:.2f}ms, Tokens per second: {tokens_per_sec:.2f}")
 
-        if (step+1) % 200 == 0:
-            val_loss_accum,val_perplexity,val_accuracy_pct = run_validation(model, val_loader, device, step)
+        if (step+1) % 1000 == 0:
+            # We skip the old TF-based validation to follow user instruction
+            # val_loss_accum, val_perplexity, val_accuracy_pct = run_teacher_forcing_validation(model, val_loader, device, step)
+            val_gen_accuracy_pct = run_generation_validation(model, val_loader, device, step)
        
         if (step+1) % 10 == 0:
             log_dict = {
@@ -205,10 +282,8 @@ def train_rpn_llm(start_step=0, checkpoint_path=None):
                 "time": dt,
                 "tokens_per_sec": tokens_per_sec,
             }
-            if (step+1) % 200 == 0:
-                log_dict["val_loss"] = val_loss_accum
-                log_dict["val_perplexity"] = val_perplexity
-                log_dict["val_accuracy_pct"] = val_accuracy_pct
+            if (step+1) % 1000 == 0:
+                log_dict["val_gen_accuracy_pct"] = val_gen_accuracy_pct
             wandb.log(log_dict, step=step+1)
     
         if (step+1) % 20000 == 0:
