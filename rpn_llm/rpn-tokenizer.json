@@ -83,6 +83,15 @@
       "rstrip": false,
       "normalized": false,
       "special": true
+    },
+    {
+      "id": 9,
+      "content": "|",
+      "single_word": false,
+      "lstrip": false,
+      "rstrip": false,
+      "normalized": false,
+      "special": false
     }
   ],
   "normalizer": null,
@@ -110,6 +119,7 @@
       "[MASK]": 6,
       "[BORROW]": 7,
       "[PASS]": 8,
+      "|": 9,
       "0": 10,
       "1": 11,
       "2": 12,

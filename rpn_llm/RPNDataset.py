@@ -134,7 +134,7 @@ class RPNDataset(Dataset):
         carry = 0
         
         if op == '+':
-            prefix = f"< {a_str} {b_str} + = :"
+            prefix = f"<{a_str} {b_str}+=:"
             derived_digits = []
             for i in range(max_len):
                 d_a = int(a_str[i]) if i < len(a_str) else 0
@@ -142,12 +142,12 @@ class RPNDataset(Dataset):
                 res = d_a + d_b + carry
                 new_carry = res // 10
                 digit = res % 10
-                steps.append(f"{d_a} + {d_b} + {carry} = {digit}")
+                steps.append(f"{d_a}+{d_b}+{carry}={digit}")
                 derived_digits.append(str(digit))
                 carry = new_carry
                 
             if carry > 0:
-                steps.append(f"0 + 0 + {carry} = {carry}")
+                steps.append(f"0+0+{carry}={carry}")
                 derived_digits.append(str(carry))
                 
             ans = a + b
@@ -158,12 +158,12 @@ class RPNDataset(Dataset):
 
             ans_rev = str(ans)[::-1]
             ans_str = str(ans) 
-            scratchpad_math = " : ".join(steps)
-            return f"{prefix} {scratchpad_math} : {ans_rev} : > {ans_str}"
+            scratchpad_math = ":".join(steps)
+            return f"{prefix}{scratchpad_math}:{ans_rev}>{ans_str}"
             
         elif op == '-':
             # Ten's Complement Two-pass Subtraction completely eradicating zero-shot magnitude prediction!
-            prefix = f"< {a_str} {b_str} - = :"
+            prefix = f"<{a_str} {b_str}-=:"
             derived_digits = []
             for i in range(max_len):
                 d_a = int(a_str[i]) if i < len(a_str) else 0
@@ -176,37 +176,37 @@ class RPNDataset(Dataset):
                 else:
                     new_carry = 0
                     
-                steps.append(f"{d_a} - {d_b} - {carry} = {res}")
+                steps.append(f"{d_a}-{d_b}-{carry}={res}")
                 derived_digits.append(str(res))
                 carry = new_carry
                 
             ans = a - b
             ans_str = str(ans)
-            scratchpad_math = " : ".join(steps)
+            scratchpad_math = ":".join(steps)
             
             if carry == 0:
                 # Positive answer!
-                steps_part2 = [f"[BORROW] 0 > +", "".join(derived_digits)]
-                final_scratchpad = " : ".join([scratchpad_math] + steps_part2)
+                steps_part2 = [f"[BORROW]0|+", "".join(derived_digits)]
+                final_scratchpad = ":".join([scratchpad_math] + steps_part2)
             else:
                 # Negative answer => Ten's Complement Pass!
-                steps_part2 = [f"[BORROW] 1 > -"]
+                steps_part2 = [f"[BORROW]1|-"]
                 tens_comp_digits = []
                 found_nonzero = False
                 for d_str in derived_digits: # Going LSB to MSB
                     d = int(d_str)
                     if not found_nonzero:
                         if d == 0:
-                            steps_part2.append(f"[PASS] 0 = 0")
+                            steps_part2.append(f"[PASS]0=0")
                             tens_comp_digits.append("0")
                         else:
                             comp = 10 - d
-                            steps_part2.append(f"10 - {d} = {comp}")
+                            steps_part2.append(f"10-{d}={comp}")
                             tens_comp_digits.append(str(comp))
                             found_nonzero = True
                     else:
                         comp = 9 - d
-                        steps_part2.append(f"9 - {d} = {comp}")
+                        steps_part2.append(f"9-{d}={comp}")
                         tens_comp_digits.append(str(comp))
                 
                 # Check arithmetic truth
@@ -214,9 +214,9 @@ class RPNDataset(Dataset):
                 assert derived_val == str(abs(ans)), f"Tens Comp {derived_val} != Abs({ans})"
                 
                 steps_part2.append("".join(tens_comp_digits))
-                final_scratchpad = " : ".join([scratchpad_math] + steps_part2)
+                final_scratchpad = ":".join([scratchpad_math] + steps_part2)
 
-            return f"{prefix} {final_scratchpad} : > {ans_str}"
+            return f"{prefix}{final_scratchpad}>{ans_str}"
         else:
             return ""
 
@@ -260,7 +260,7 @@ if __name__ == "__main__":
 
     max_number = 99999
     # Tagging Phase 10 model-driven scale mapping alignments
-    file_path_prefix = "rpn_llm/data/RPNData-plusminus" + str(max_number) + "_tens_complement"
+    file_path_prefix = "rpn_llm/data/RPNData-plusminus" + str(max_number) + "_tens_complement_compress"
 
     dataset = RPNDataset(
         num_samples=6000000,
@@ -279,9 +279,9 @@ if __name__ == "__main__":
     Generate random number between 0-99 assign 0-79 to trian, 80-89 to val, 90-99 to test
     Open three files, write the data to the files
     """
-    train_f = open(file_path_prefix + "-_train.txt", 'w', encoding='utf-8')
-    val_f = open(file_path_prefix + "-_val.txt", 'w', encoding='utf-8')
-    test_f = open(file_path_prefix + "-_test.txt", 'w', encoding='utf-8')
+    train_f = open(file_path_prefix + "_train.txt", 'w', encoding='utf-8')
+    val_f = open(file_path_prefix + "_val.txt", 'w', encoding='utf-8')
+    test_f = open(file_path_prefix + "_test.txt", 'w', encoding='utf-8')
 
     import collections
     train_length_counts = collections.defaultdict(int)

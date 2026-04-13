@@ -34,9 +34,10 @@ def run_validation(model, val_loader, device, step):
             y_cpu = y_val.cpu().numpy()
             
             for b in range(y_val.size(0)):
-                # Find '>' in ground truth (y_val)
+                # Find the LAST '>' in ground truth (y_val) to isolate the final answer
+                # especially important for subtraction with internal borrow markers.
                 gt_pos_y = None
-                for t in range(y_val.shape[1]):
+                for t in range(y_val.shape[1] - 1, -1, -1):
                     if y_val[b, t].item() == gt_id:
                         gt_pos_y = t
                         break
@@ -97,8 +98,8 @@ def train_rpn_llm(start_step=0, checkpoint_path=None):
     print(f"Gradient accumulation steps: {grad_accum_steps}")
 
     # Phase 8: Disabling padding completely and explicitly reversing native mapping values.
-    train_dataset = "rpn_llm/data/RPNData-plusminus99999_tens_complement-_train.txt"
-    val_dataset = "rpn_llm/data/RPNData-plusminus99999_tens_complement-_val.txt"
+    train_dataset = "rpn_llm/data/RPNData-plusminus99999_tens_complement_compress_train.txt"
+    val_dataset = "rpn_llm/data/RPNData-plusminus99999_tens_complement_compress_val.txt"
     train_loader = DataLoaderLite(B, T, train_dataset)
     val_loader = DataLoaderLite(B, T, val_dataset)
 
@@ -218,12 +219,12 @@ def train_rpn_llm(start_step=0, checkpoint_path=None):
                 'step': step,
                 'train_loader': train_loader,
             }
-            torch.save(checkpoint, f'rpn_llm/models/rope25M_tens_complement_{step+1}.pt')
-            print(f"Model checkpoint saved to rpn_llm/models/rope25M_tens_complement_{step+1}.pt")
+            torch.save(checkpoint, f'rpn_llm/models/rope25M_tens_complement_compress_{step+1}.pt')
+            print(f"Model checkpoint saved to rpn_llm/models/rope25M_tens_complement_compress_{step+1}.pt")
    
     wandb.finish()
-    torch.save(checkpoint, f'rpn_llm/models/rope25M_tens_complement_final.pt')
-    print(f"Model checkpoint saved to rpn_llm/models/rope25M_tens_complement_final.pt")
+    torch.save(checkpoint, f'rpn_llm/models/rope25M_tens_complement_compress_final.pt')
+    print(f"Model checkpoint saved to rpn_llm/models/rope25M_tens_complement_compress_final.pt")
 
 if __name__ == "__main__":
     import sys

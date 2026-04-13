@@ -101,7 +101,8 @@ def validate_model(checkpoint_path, test_file_path, output_fail_path):
     
     # Max generation steps for an answer
     # A padded 5-digit math evaluates to ~112 tokens dynamically, pushing past the bounds of 96 natively!
-    max_new_tokens = 164
+    # For Ten's Complement subtraction, sequences can reach nearly 200 tokens.
+    max_new_tokens = 256
 
     total_items = sum(len(items) for items in length_groups.values())
     start_time = time.time()
@@ -294,6 +295,6 @@ def validate_model(checkpoint_path, test_file_path, output_fail_path):
 
 if __name__ == "__main__":
     import sys
-    model_path = sys.argv[1] if len(sys.argv) > 1 else "rpn_llm/models/rope25M_tens_complement_final.pt"
-    validate_model(model_path, "rpn_llm/data/RPNData-plusminus99999_tens_complement-_test.txt",
-                            "rpn_llm/results/tens_complement_failures_final.txt")
+    model_path = sys.argv[1] if len(sys.argv) > 1 else "rpn_llm/models/rope25M_tens_complement_compress_final.pt"
+    validate_model(model_path, "rpn_llm/data/RPNData-plusminus99999_tens_complement_compress_test.txt",
+                            "rpn_llm/results/tens_complement_failures_compress_final.txt")

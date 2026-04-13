@@ -40,8 +40,19 @@ class DataLoaderLite:
         bin_path = input_path + ".cnt.bin"
         mask_path = input_path + ".mask.bin"
         
-        if not os.path.exists(bin_path) or not os.path.exists(mask_path):
-            print(f"Binary files not found. Creating cache for {input_path}...")
+        # Staleness check: recreate if txt is newer than bin
+        is_stale = False
+        if os.path.exists(bin_path):
+            txt_mtime = os.path.getmtime(input_path)
+            bin_mtime = os.path.getmtime(bin_path)
+            if txt_mtime > bin_mtime:
+                is_stale = True
+        
+        if not os.path.exists(bin_path) or not os.path.exists(mask_path) or is_stale:
+            if is_stale:
+                print(f"Dataset {input_path} has been updated. Recreating binary cache...")
+            else:
+                print(f"Binary files not found. Creating cache for {input_path}...")
             self._create_binary_cache(input_path, bin_path, mask_path)
             
         # Load using memory mapping for near-instant startup and low RAM usage

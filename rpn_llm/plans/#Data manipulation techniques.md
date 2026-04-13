@@ -29,8 +29,7 @@ Rewrite the expression in reverse in the dataset and show in scratchpad \<scratc
 The above technique (fully_reversed_nopad) reversed the input data. This technique builds on it and puts reversal inside scratchpad. input expression is as user entered.
 We also add random spaces between numbers, operators and equals sign. This is done so model doesn't learn exact positions of =. The dataset was recreated with better distribution of numbers which was a problem in previous technique (fully_reversed_nopad) where 85% data had 15 tokens.
 
-### Results (total test rows 15,922)
-**Total Accuracy: 95.87% (15265/15922)**
+### Total Accuracy: 95.87% (15265/15922)
 - 94% failures are due to eager start of incorrect scratchpad (missing < and reverse numbers)
 
 <pre>
@@ -58,3 +57,53 @@ Token Length | Total Items | Accuracy
  ## Ten's complement two pass subtraction
  This plan rewrites the generated subtraction format in RPNDataset.py to completely eradicate the zero-shot $A < B$ global sign prediction. The model will now blindly evaluate $A - B$ right to left cleanly taking borrows, and run a fast local 10s-complement correction string on the output if the final sequence borrow is 1.
  The addition is same as model driven reversals.
+
+### Validation Accuracy: 96.03% (15310/15943)
+- Of the 633 failures 309 are for subtraction and 324 for addition, so pretty even split.
+- 17 failures are where second number **dropped a last digit while reversing**, math is correct.
+- 616 failures are **eager start** where model starts scratchpad without < and reverses numbers.
+<pre>
+
+--- Breakdown by Prompt Length ---
+Token Length | Total Items | Accuracy
+ 8 | 295        | 96.95%
+ 9 | 1735       | 73.83%
+10 | 6294       | 87.70%
+11 | 15320      | 93.16%
+12 | 29994      | 92.77%
+13 | 49246      | 95.41%
+14 | 68872      | 97.46%
+15 | 83480      | 99.41%
+16 | 90008      | 99.51%
+17 | 83515      | 100.00%
+18 | 68567      | 100.00%
+19 | 49094      | 100.00%
+20 | 30155      | 100.00%
+21 | 15484      | 100.00%
+22 | 6264       | 100.00%
+23 | 1817       | 99.90%
+24 | 288        | 99.65%
+
+--- Breakdown by Carry Operations ---
+Carries | Total   | Correct | Failures | Accuracy
+0       | 5638    | 5359    | 279     | 95.05%
+1       | 5169    | 4897    | 272     | 94.74%
+2       | 3130    | 3066    | 64      | 97.96%
+3       | 1463    | 1448    | 15      | 98.97%
+4       | 490     | 487     | 3       | 99.39%
+5       | 53      | 53      | 0       | 100.00%
+
+--- Edge Case Analysis ---
+Category         | Total    | Correct  | Accuracy
+zero_operand     | 832      | 784      | 94.23%
+negative_result  | 3934     | 3781     | 96.11%
+normal           | 11387    | 10939    | 96.07%
+</pre>
+
+ ## Compressed scratchpad on Ten's complement two pass subtraction
+### What was changed:
+New Marker: Added | to rpn-tokenizer.json at ID 9. This is used as the internal borrow separator (e.g., [BORROW]0|+).
+
+- Compressed Logic: Removed spaces around all operators (+, -, =) and separators (:) in RPNDataset.py
+.
+- Strict Bracketing: The scratchpad now strictly adheres to the format \<scratchpad\>answer with no trailing spaces after total closure.
