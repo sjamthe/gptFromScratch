@@ -107,3 +107,77 @@ New Marker: Added | to rpn-tokenizer.json at ID 9. This is used as the internal 
 - Compressed Logic: Removed spaces around all operators (+, -, =) and separators (:) in RPNDataset.py
 .
 - Strict Bracketing: The scratchpad now strictly adheres to the format \<scratchpad\>answer with no trailing spaces after total closure.
+
+### Validation Accuracy: 99.97%
+<pre>
+Total Evaluated: 354782
+Total Correct: 354658
+Total Failures: 124
+
+--- Breakdown by Carry Operations ---
+Carries | Total   | Correct | Failures | Accuracy
+0       | 120369  | 120290  | 79      | 99.93%
+1       | 128564  | 128525  | 39      | 99.97%
+2       | 70148   | 70143   | 5       | 99.99%
+3       | 28096   | 28095   | 1       | 100.00%
+4       | 6948    | 6948    | 0       | 100.00%
+5       | 657     | 657     | 0       | 100.00%
+
+--- Edge Case Analysis ---
+Category         | Total    | Correct  | Accuracy
+zero_operand     | 15176    | 15157    | 99.87%
+negative_result  | 88326    | 88326    | 100.00%
+normal           | 255055   | 254950   | 99.96%
+
+</pre>
+
+### Extended data test
+On a test file that contains atleast one number > 99999 the model fails spectacularly (0% accuracy).
+But on closer examination the failures were only in reversing the numbers. The math after reversal was 99.95% accurate
+So model knows the math is just confused about the length of numbers. The next variation on test file tries to fix that by bracketing the numbers.
+
+## Brackated input numbers and Compressed scratchpad on Ten's complement (current best)
+Put the input digits in bracketes () so model knows how to identify them. finetune the final model on this dataset.
+
+### Results
+Model trains well as earlier (> 99%) but fails on large digit test set (0% accuracy).
+
+## Echo-then-Reverse Scratchpad
+1. Echo: Copy the input string exactly. Transformers are incredibly good at identity operations (copying) and this forces the numbers into the active local KV-cache of the scratchpad.
+2. Reverse Locally: Once copied, reverse the numbers from the scratchpad copy, not the prompt.
+<pre>
+PROMPT: 608951119 89519 - =
+SCRATCHPAD: <608951119 89519 | 911159806 91598 | 9-9-0=0...
+</pre>
+
+### 100% Accuracy on dataset with numbers less than 100,000
+<pre>
+Total Evaluated: 15941
+Total Correct: 15941
+Total Failures: 0
+Accuracy: 100.00%
+
+--- Breakdown by Carry Operations ---
+Carries | Total   | Correct | Failures | Accuracy
+0       | 5577    | 5577    | 0       | 100.00%
+1       | 5330    | 5330    | 0       | 100.00%
+2       | 3006    | 3006    | 0       | 100.00%
+3       | 1496    | 1496    | 0       | 100.00%
+4       | 492     | 492     | 0       | 100.00%
+5       | 40      | 40      | 0       | 100.00%
+
+--- Edge Case Analysis ---
+Category         | Total    | Correct  | Accuracy
+zero_operand     | 804      | 804      | 100.00%
+negative_result  | 3991     | 3991     | 100.00%
+normal           | 11343    | 11343    | 100.00%
+</pre>
+
+### Model fails on large digit test set 0% accuracy
+
+**What is happening?**
+- The Good: The model correctly copies the first operand (54874) perfectly.
+- The Bad (The Echo Truncation): For the second operand (818591913), it only copies the first 5 digits (81859) and then immediately writes the | phase separator.
+- The Ugly (The Reverse Truncation): In the second phase, it reverses what it just memorized in the Echo phase (81859 reversed becomes 95818). It does this entirely correctly based on its truncated copy!
+- The Math: It then performs perfect Tens Complement math on these truncated digits.
+

@@ -14,12 +14,20 @@ def run_teacher_forcing_validation(model, val_loader, device, step):
     gt_id  = tokenizer.encode(">")[0]
     unk_id = tokenizer.encode("[UNK]")[0]
     nl_id = tokenizer.encode("\n")[0]
+    pad_id = 0 # [PAD] is 0
 
     model.eval()
     val_loss_accum = 0.0
     val_loss_steps = 200
+    
+    # Equation-level counters (Final Answer only)
     val_correct_accum = 0
     val_target_accum = 0
+    
+    # Global token-level counters (All valid tokens in sequence)
+    val_token_correct_accum = 0
+    val_token_target_accum = 0
+
     with torch.no_grad():
         for _ in range(val_loss_steps):
             x_val, y_val = val_loader.next_batch()
@@ -28,13 +36,20 @@ def run_teacher_forcing_validation(model, val_loader, device, step):
                 logits, loss_val = model(x_val, y_val)
             val_loss_accum += loss_val.item()
             
-            # Calculate strictly isolated Equation-Level Exact Match accuracy (Teacher Forcing)
+            # Calculate accuracies
             preds = torch.argmax(logits, dim=-1)
+            
+            # 1. Global Token-Level Accuracy
+            # Mask out non-content tokens (UNK, NL, PAD)
+            valid_mask = (y_val != unk_id) & (y_val != nl_id) & (y_val != pad_id)
+            val_token_correct_accum += ((preds == y_val) & valid_mask).sum().item()
+            val_token_target_accum += valid_mask.sum().item()
+
+            # 2. Equation-Level Exact Match (Final Answer only)
             preds_cpu = preds.cpu().numpy()
             y_cpu = y_val.cpu().numpy()
             
             for b in range(y_val.size(0)):
-                # Find the LAST '>' in ground truth (y_val) to isolate the final answer
                 gt_pos_y = None
                 for t in range(y_val.shape[1] - 1, -1, -1):
                     if y_val[b, t].item() == gt_id:
@@ -42,7 +57,7 @@ def run_teacher_forcing_validation(model, val_loader, device, step):
                         break
 
                 if gt_pos_y is None:
-                    continue  # malformed or split sequence, skip
+                    continue
 
                 offset = gt_pos_y + 1
                 equation_correct = True
@@ -52,7 +67,7 @@ def run_teacher_forcing_validation(model, val_loader, device, step):
                     tok_y = y_cpu[b, offset]
                     tok_p = preds_cpu[b, offset]
 
-                    if tok_y in (unk_id, nl_id):
+                    if tok_y in (unk_id, nl_id, pad_id):
                         break
                     if tok_y != tok_p:
                         equation_correct = False
@@ -65,11 +80,14 @@ def run_teacher_forcing_validation(model, val_loader, device, step):
                         val_correct_accum += 1.0
 
     val_loss_accum /= val_loss_steps
-    val_accuracy_pct = (val_correct_accum / val_target_accum) * 100.0 if val_target_accum > 0 else 0.0
+    val_ans_accuracy_pct = (val_correct_accum / val_target_accum) * 100.0 if val_target_accum > 0 else 0.0
+    val_token_accuracy_pct = (val_token_correct_accum / val_token_target_accum) * 100.0 if val_token_target_accum > 0 else 0.0
     val_perplexity = math.exp(val_loss_accum)
-    print(f"Step {step+1}, Val Loss: {val_loss_accum:.4f}, Val TF Acc: {val_accuracy_pct:.2f}%, Val Perplexity: {val_perplexity:.4f}")
+    
+    print(f"Step {step+1}, Val Loss: {val_loss_accum:.4f}, Val TF Token Acc: {val_token_accuracy_pct:.2f}%, Val TF Ans Acc: {val_ans_accuracy_pct:.2f}%, Val PPL: {val_perplexity:.4f}")
+    
     model.train()
-    return val_loss_accum, val_perplexity, val_accuracy_pct
+    return val_loss_accum, val_perplexity, val_ans_accuracy_pct, val_token_accuracy_pct
 
 def run_generation_validation(model, val_loader, device, step, num_batches=4):
     """
@@ -119,7 +137,7 @@ def run_generation_validation(model, val_loader, device, step, num_batches=4):
                 target_str = tokenizer.decode(full_target_seq)
                 if ">" not in target_str:
                     continue
-                expected_answer = target_str.split(">")[-1].strip()
+                expected_answer = target_str.split(">")[-1].split("[UNK]")[0].split("\n")[0].strip()
                 
                 # --- GENERATION ---
                 idx = prompt_tokens
@@ -143,7 +161,7 @@ def run_generation_validation(model, val_loader, device, step, num_batches=4):
                 
                 # --- EVALUATION ---
                 pred_str = tokenizer.decode(generated_tokens)
-                pred_answer = pred_str.split(">")[-1].strip() if ">" in pred_str else "N/A"
+                pred_answer = pred_str.split(">")[-1].split("[UNK]")[0].split("\n")[0].strip() if ">" in pred_str else "N/A"
                 
                 if pred_answer == expected_answer:
                     total_correct += 1
@@ -173,8 +191,8 @@ def train_rpn_llm(start_step=0, checkpoint_path=None):
     print(f"Gradient accumulation steps: {grad_accum_steps}")
 
     # Phase 8: Disabling padding completely and explicitly reversing native mapping values.
-    train_dataset = "rpn_llm/data/RPNData-plusminus99999_tens_complement_compress_train.txt"
-    val_dataset = "rpn_llm/data/RPNData-plusminus99999_tens_complement_compress_val.txt"
+    train_dataset = "rpn_llm/data/RPNData-plusminus99999_tens_comp_echo_train.txt"
+    val_dataset = "rpn_llm/data/RPNData-plusminus99999_tens_comp_echo_val.txt"
     train_loader = DataLoaderLite(B, T, train_dataset)
     val_loader = DataLoaderLite(B, T, val_dataset)
 
@@ -270,9 +288,7 @@ def train_rpn_llm(start_step=0, checkpoint_path=None):
             print(f"Step {step+1}, Loss: {loss_accum.item():.4f}, lr: {lr:.4e}, norm: {norm:.4f}, Time: {dt:.2f}ms, Tokens per second: {tokens_per_sec:.2f}")
 
         if (step+1) % 1000 == 0:
-            # We skip the old TF-based validation to follow user instruction
-            # val_loss_accum, val_perplexity, val_accuracy_pct = run_teacher_forcing_validation(model, val_loader, device, step)
-            val_gen_accuracy_pct = run_generation_validation(model, val_loader, device, step)
+            val_loss_accum, val_perplexity, val_ans_acc, val_tok_acc = run_teacher_forcing_validation(model, val_loader, device, step)
        
         if (step+1) % 10 == 0:
             log_dict = {
@@ -283,10 +299,13 @@ def train_rpn_llm(start_step=0, checkpoint_path=None):
                 "tokens_per_sec": tokens_per_sec,
             }
             if (step+1) % 1000 == 0:
-                log_dict["val_gen_accuracy_pct"] = val_gen_accuracy_pct
+                log_dict["val_loss"] = val_loss_accum
+                log_dict["val_perplexity"] = val_perplexity
+                log_dict["val_ans_accuracy"] = val_ans_acc
+                log_dict["val_token_accuracy"] = val_tok_acc
             wandb.log(log_dict, step=step+1)
     
-        if (step+1) % 20000 == 0:
+        if (step+1) % 16000 == 0:
             checkpoint = {
                 'model': model.state_dict(),
                 'optimizer': optimizer.state_dict(),
@@ -294,12 +313,12 @@ def train_rpn_llm(start_step=0, checkpoint_path=None):
                 'step': step,
                 'train_loader': train_loader,
             }
-            torch.save(checkpoint, f'rpn_llm/models/rope25M_tens_complement_compress_{step+1}.pt')
-            print(f"Model checkpoint saved to rpn_llm/models/rope25M_tens_complement_compress_{step+1}.pt")
+            torch.save(checkpoint, f'rpn_llm/models/rope25M_tens_comp_echo_{step+1}.pt')
+            print(f"Model checkpoint saved to rpn_llm/models/rope25M_tens_comp_echo_{step+1}.pt")
    
     wandb.finish()
-    torch.save(checkpoint, f'rpn_llm/models/rope25M_tens_complement_compress_final.pt')
-    print(f"Model checkpoint saved to rpn_llm/models/rope25M_tens_complement_compress_final.pt")
+    torch.save(checkpoint, f'rpn_llm/models/rope25M_tens_comp_echo_final.pt')
+    print(f"Model checkpoint saved to rpn_llm/models/rope25M_tens_comp_echo_final.pt")
 
 if __name__ == "__main__":
     import sys

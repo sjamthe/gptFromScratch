@@ -159,11 +159,25 @@ class RPNDataset(Dataset):
             ans_rev = str(ans)[::-1]
             ans_str = str(ans) 
             scratchpad_math = ":".join(steps)
-            return f"{prefix}{scratchpad_math}:{ans_rev}>{ans_str}"
+            
+            a_str_orig = str(a)
+            b_str_orig = str(b)
+            a_str_rev = a_str_orig[::-1]
+            b_str_rev = b_str_orig[::-1]
+            
+            echo_part = f"{a_str_orig} {b_str_orig}"
+            rev_part = f"{a_str_rev} {b_str_rev} {op}"
+            
+            return f"<{echo_part} | {rev_part} | {scratchpad_math}:{ans_rev}>{ans_str}"
             
         elif op == '-':
-            # Ten's Complement Two-pass Subtraction completely eradicating zero-shot magnitude prediction!
-            prefix = f"<{a_str} {b_str}-=:"
+            a_str_orig = str(a)
+            b_str_orig = str(b)
+            a_str_rev = a_str_orig[::-1]
+            b_str_rev = b_str_orig[::-1]
+
+            # Echo-then-Reverse Strategy using '|' as phase delimiter
+            prefix = f"<{a_str_orig} {b_str_orig} | {a_str_rev} {b_str_rev} {op} | "
             derived_digits = []
             for i in range(max_len):
                 d_a = int(a_str[i]) if i < len(a_str) else 0
@@ -252,6 +266,49 @@ class RPNDataset(Dataset):
             # the unique constraint immediately exhausted them and skipped all future short samples! 
             # Allowing natural duplicates balances the training loss geometry perfectly across lengths.
             self.examples.append((rpn_expr, result_str))
+            
+    def generate_large_digit_samples(self, num_samples: int, tokenizer=None, max_seq_len=256):
+        """
+        Generates samples where at least one number is between 100,000 and 999,999,999.
+        Validates that each sample fits within the max_seq_len.
+        """
+        samples = []
+        operations = ('+', '-')
+        
+        # Ranges as requested: 100k to 999M inclusive
+        MIN_LARGE = 100_000
+        MAX_VAL = 999_999_999
+        
+        def rs(): return " " * random.randint(1, 3)
+        
+        while len(samples) < num_samples:
+            # One number MUST be large
+            a = random.randint(MIN_LARGE, MAX_VAL)
+            # Another number is ANY 0 to 9-digits
+            b = random.randint(0, MIN_LARGE)
+            
+            # Randomly swap to ensure robust operand-order generalization
+            if random.random() > 0.5:
+                a, b = b, a
+                
+            op = random.choice(operations)
+            result_str = self._generate_scratchpad(a, b, op)
+            rpn_expr = f"{rs()}{a}{rs()}{b}{rs()}{op}"
+            
+            # Clean deterministic prompt end
+            full_line = f"{rpn_expr} ={result_str}"
+            
+            if tokenizer is not None:
+                tokens = tokenizer.encode(full_line)
+                if len(tokens) > max_seq_len:
+                    continue # Reject overflow
+                    
+            samples.append((rpn_expr, result_str))
+            
+            if len(samples) % 50000 == 0:
+                print(f"Generated {len(samples)}/{num_samples} valid large-digit samples...")
+                
+        return samples
                     
 # Example usage:
 from tokenizers import Tokenizer
@@ -259,38 +316,29 @@ from tokenizers import Tokenizer
 if __name__ == "__main__":
 
     max_number = 99999
-    # Tagging Phase 10 model-driven scale mapping alignments
-    file_path_prefix = "rpn_llm/data/RPNData-plusminus" + str(max_number) + "_tens_complement_compress"
-
+    print("Initializing full 6M dataset...")
     dataset = RPNDataset(
         num_samples=6000000,
         max_operands=2,
-        operations=('+','-',),  # Start with just addition
+        operations=('+','-',),
         max_number=max_number
     )
-    print("max_number=",max_number, "datalen=",len(dataset))
-
-    # Save the dataset to files with train, validation, and test sets
-    train_pct = 80
-    val_pct = 10
-    test_pct = 100 - train_pct - val_pct
-
-    """
-    Generate random number between 0-99 assign 0-79 to trian, 80-89 to val, 90-99 to test
-    Open three files, write the data to the files
-    """
+    
+    
+    print("Generating Training Data (Echo-then-Reverse)...")
+    file_path_prefix = "rpn_llm/data/RPNData-plusminus" + str(max_number) + "_tens_comp_echo"
     train_f = open(file_path_prefix + "_train.txt", 'w', encoding='utf-8')
     val_f = open(file_path_prefix + "_val.txt", 'w', encoding='utf-8')
     test_f = open(file_path_prefix + "_test.txt", 'w', encoding='utf-8')
 
+    train_pct = 80
+    val_pct = 10
     import collections
     train_length_counts = collections.defaultdict(int)
 
     for example in dataset:
         rand_num = random.randint(0, 99)
         def rs(): return " " * random.randint(1, 3)
-        
-        # Add random spaces ONLY before the `=` sign so the target deterministic format starts clean!
         eq_str = f"{rs()}="
         
         if rand_num < train_pct:
@@ -305,13 +353,19 @@ if __name__ == "__main__":
     train_f.close()
     val_f.close()
     test_f.close()
-
-    print("Data saved to files")
+    print("Training data generation complete.")
     
-    print("\n--- Training Set Prompt Length Distribution ---")
-    print("Length | Count     | Percentage")
-    total_train_items = sum(train_length_counts.values())
-    for length in sorted(train_length_counts.keys()):
-        count = train_length_counts[length]
-        pct = (count / total_train_items) * 100 if total_train_items > 0 else 0
-        print(f"{length:6d} | {count:<9d} | {pct:.2f}%")
+    # Generalization Test Generation
+    from utils import RPNTokenizer
+    tokenizer = RPNTokenizer("rpn_llm/rpn-tokenizer.json")
+    
+    num_gen_samples = 300000
+    print(f"Generating {num_gen_samples} large-digit generalization samples...")
+    large_samples = dataset.generate_large_digit_samples(num_gen_samples, tokenizer=tokenizer, max_seq_len=256)
+    
+    out_path = "rpn_llm/data/RPNData_large_digit_test_echo.txt"
+    with open(out_path, 'w', encoding='utf-8') as f:
+        for rpn, ans in large_samples:
+            def rs(): return " " * random.randint(1, 3)
+            f.write(f"{rpn}{rs()}={ans}\n")
+    print(f"Large-digit test data saved to {out_path}")

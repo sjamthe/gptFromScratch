@@ -6,7 +6,7 @@ from collections import defaultdict
 from model_rope import GPT, GPTConfig
 from utils import RPNTokenizer, DataLoaderLite
 
-VALIDATE_PCT = .025
+VALIDATION_SET_RATIO = 0.025
 
 def calculate_carries(a_str, b_str, op):
     a, b = int(a_str), int(b_str)
@@ -112,7 +112,7 @@ def validate_model(checkpoint_path, test_file_path, output_fail_path):
     with open(output_fail_path, "w", encoding="utf-8") as f:
         f.write("--- Real-time Validation Failures ---\n\n")
 
-    max_rows = int(VALIDATE_PCT*total_items/len(length_groups))
+    max_rows = int(VALIDATION_SET_RATIO*total_items/len(length_groups))
     print(f"Beginning batched evaluation on {max_rows} rows per group...")
     accuracy_by_length = {}
     group_idx = 1
@@ -203,12 +203,19 @@ def validate_model(checkpoint_path, test_file_path, output_fail_path):
                         return "-" + s[1:][::-1]
                     return s[::-1]
                                 
-                parts = prompt_str.split()
+                # Clean operands for math validation logic (stripping brackets)
+                parts = [p.strip("() ") for p in prompt_str.split()]
                 carries = 0
                 is_zero = False
                 if len(parts) >= 3:
-                    is_zero = (int(parts[0]) == 0 or int(parts[1]) == 0)
-                    carries = calculate_carries(parts[0], parts[1], parts[2])
+                    try:
+                        p0_val = int(parts[0])
+                        p1_val = int(parts[1])
+                        is_zero = (p0_val == 0 or p1_val == 0)
+                        carries = calculate_carries(parts[0], parts[1], parts[2])
+                    except ValueError:
+                        # Fallback for unexpected format but don't crash
+                        pass
                     
                 is_neg = expected_ans_str.startswith('-')
                 is_normal = not is_zero and not is_neg
@@ -295,6 +302,6 @@ def validate_model(checkpoint_path, test_file_path, output_fail_path):
 
 if __name__ == "__main__":
     import sys
-    model_path = sys.argv[1] if len(sys.argv) > 1 else "rpn_llm/models/rope25M_tens_complement_compress_final.pt"
-    validate_model(model_path, "rpn_llm/data/RPNData-plusminus99999_tens_complement_compress_test.txt",
-                            "rpn_llm/results/tens_complement_failures_compress_final.txt")
+    model_path = sys.argv[1] if len(sys.argv) > 1 else "rpn_llm/models/rope25M_tens_comp_echo_final.pt"
+    validate_model(model_path, "rpn_llm/data/RPNData_large_digit_test_echo.txt",
+                            "rpn_llm/results/tens_comp_echo_failures_large_digit.txt")
