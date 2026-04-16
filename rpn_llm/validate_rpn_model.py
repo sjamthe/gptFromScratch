@@ -302,6 +302,6 @@ def validate_model(checkpoint_path, test_file_path, output_fail_path):
 
 if __name__ == "__main__":
     import sys
-    model_path = sys.argv[1] if len(sys.argv) > 1 else "rpn_llm/models/rope25M_tens_comp_echo_final.pt"
-    validate_model(model_path, "rpn_llm/data/RPNData_large_digit_test_echo.txt",
-                            "rpn_llm/results/tens_comp_echo_failures_large_digit.txt")
+    model_path = sys.argv[1] if len(sys.argv) > 1 else "rpn_llm/models/rope25M_mixed-1-22_tens_comp_final.pt"
+    validate_model(model_path, "rpn_llm/data/RPNData-mixed-1-22_tens_comp_test.txt",    
+                            "rpn_llm/results/rope25M_mixed-1-22_tens_comp_final_failures.txt")

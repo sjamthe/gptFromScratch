@@ -181,3 +181,11 @@ normal           | 11343    | 11343    | 100.00%
 - The Ugly (The Reverse Truncation): In the second phase, it reverses what it just memorized in the Echo phase (81859 reversed becomes 95818). It does this entirely correctly based on its truncated copy!
 - The Math: It then performs perfect Tens Complement math on these truncated digits.
 
+## 9-9's training data on Compressed scratchpad on Ten's complement
+The new training dataset (rpn_llm/data/RPNData-mixed-1-9_tens_comp_train.txt) contains 6 million samples with operand lengths ranging uniformly from 1 to 9 digits. This will force the model to learn logical delimiters instead of expecting a fixed 5-digit length.
+
+### Results
+trains well but suffers from same problem as 5-9s. if you give a number > 9-9s it cannot reverse it properly.
+
+## 1-22 length numbers on Compressed scratchpad on Ten's complement
+Increase length of numbers to 22. 0-3 spaces added before numbers and operator. 
