@@ -191,8 +191,8 @@ def train_rpn_llm(start_step=0, checkpoint_path=None):
     print(f"Gradient accumulation steps: {grad_accum_steps}")
 
     # Phase 9: Mixed-Scale Scratch Training (1-9 digits)
-    train_dataset = "rpn_llm/data/RPNData-mixed-1-22_tens_comp_train.txt"
-    val_dataset = "rpn_llm/data/RPNData-mixed-1-22_tens_comp_val.txt"
+    train_dataset = "rpn_llm/data/RPNData-1-22_tens_comp_bracketed_train.txt"
+    val_dataset = "rpn_llm/data/RPNData-1-22_tens_comp_bracketed_val.txt"
     train_loader = DataLoaderLite(B, T, train_dataset)
     val_loader = DataLoaderLite(B, T, val_dataset)
 
@@ -227,7 +227,7 @@ def train_rpn_llm(start_step=0, checkpoint_path=None):
     
     wandb.init(
         project="rpn-llm",
-        name="rope25M_mixed-1-22_tens_comp",
+        name="rope25M_1-22_tens_comp_bracketed",
         config={
             "total_batch_size": total_batch_size,
             "B": B,
@@ -313,12 +313,12 @@ def train_rpn_llm(start_step=0, checkpoint_path=None):
                 'step': step,
                 'train_loader': train_loader,
             }
-            torch.save(checkpoint, f'rpn_llm/models/rope25M_mixed-1-22_tens_comp_{step+1}.pt')
-            print(f"Model checkpoint saved to rpn_llm/models/rope25M_mixed-1-22_tens_comp_{step+1}.pt")
+            torch.save(checkpoint, f'rpn_llm/models/rope25M_1-22_tens_comp_bracketed_{step+1}.pt')
+            print(f"Model checkpoint saved to rpn_llm/models/rope25M_1-22_tens_comp_bracketed_{step+1}.pt")
    
     wandb.finish()
-    torch.save(checkpoint, f'rpn_llm/models/rope25M_mixed-1-22_tens_comp_final.pt')
-    print(f"Model checkpoint saved to rpn_llm/models/rope25M_mixed-1-22_tens_comp_final.pt")
+    torch.save(checkpoint, f'rpn_llm/models/rope25M_1-22_tens_comp_bracketed_final.pt')
+    print(f"Model checkpoint saved to rpn_llm/models/rope25M_1-22_tens_comp_bracketed_final.pt")
 
 if __name__ == "__main__":
     import sys

@@ -35,7 +35,7 @@ RESET  = "\033[0m"
 DEFAULT_CKPT      = "rpn_llm/models/rope25M_mixed-1-22_tens_comp_32000.pt"
 DEFAULT_TEST_FILE = "rpn_llm/data/RPNData-mixed-1-22_tens_comp_test.txt"
 
-PROMPT_RE = re.compile(r'^\s*(-?\d+)\s+(-?\d+)\s+([+\-])\s*=')
+PROMPT_RE = re.compile(r'\((\d+)\)\((\d+)\)([+\-])=')
 
 # ── Model loader (cached across calls in same process) ────────────────────────
 _model_cache = {}

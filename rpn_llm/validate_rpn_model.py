@@ -1,4 +1,5 @@
 import os
+import re
 import torch
 import json
 import time
@@ -190,33 +191,22 @@ def validate_model(checkpoint_path, test_file_path, output_fail_path):
                 predicted_str = tokenizer.decode(gen_answer_tokens).strip() 
                 prompt_str = prompt_strs[b]
                 
-                expected_ans_str = expected_str.split('>')[-1].strip() if '>' in expected_str else expected_str
-                predicted_ans_str = predicted_str.split('>')[-1].strip() if '>' in predicted_str else predicted_str
+                # New regex-based operand extraction for (n1)(n2)op= format
+                m = re.search(r"\((\d+)\)\((\d+)\)([+\-])=?", prompt_str)
                 
-                # Intercept trailing artifacts generated forcefully beyond equation bounds!
-                predicted_ans_str = predicted_ans_str.split('[UNK]')[0].split('\n')[0].strip()
-                expected_ans_str = expected_ans_str.split('[UNK]')[0].split('\n')[0].strip()
+                expected_ans_str = expected_str.split('>')[-1].split('[UNK]')[0].split('\n')[0].strip() if '>' in expected_str else ""
+                predicted_ans_str = predicted_str.split('>')[-1].split('[UNK]')[0].split('\n')[0].strip() if '>' in predicted_str else ""
                 
-                def flip_ans(s):
-                    s = s.replace(" ", "")
-                    if s.startswith("-"):
-                        return "-" + s[1:][::-1]
-                    return s[::-1]
-                                
-                # Clean operands for math validation logic (stripping brackets)
-                parts = [p.strip("() ") for p in prompt_str.split()]
                 carries = 0
                 is_zero = False
-                if len(parts) >= 3:
+                if m:
+                    n1_str, n2_str, op = m.groups()
                     try:
-                        p0_val = int(parts[0])
-                        p1_val = int(parts[1])
+                        p0_val = int(n1_str); p1_val = int(n2_str)
                         is_zero = (p0_val == 0 or p1_val == 0)
-                        carries = calculate_carries(parts[0], parts[1], parts[2])
-                    except ValueError:
-                        # Fallback for unexpected format but don't crash
-                        pass
-                    
+                        carries = calculate_carries(n1_str, n2_str, op)
+                    except ValueError: pass
+                
                 is_neg = expected_ans_str.startswith('-')
                 is_normal = not is_zero and not is_neg
                 
@@ -302,6 +292,6 @@ def validate_model(checkpoint_path, test_file_path, output_fail_path):
 
 if __name__ == "__main__":
     import sys
-    model_path = sys.argv[1] if len(sys.argv) > 1 else "rpn_llm/models/rope25M_mixed-1-22_tens_comp_final.pt"
-    validate_model(model_path, "rpn_llm/data/RPNData-mixed-1-22_tens_comp_test.txt",    
-                            "rpn_llm/results/rope25M_mixed-1-22_tens_comp_final_failures.txt")
+    model_path = sys.argv[1] if len(sys.argv) > 1 else "rpn_llm/models/rope25M_1-22_tens_comp_bracketed_final.pt"
+    validate_model(model_path, "rpn_llm/data/RPNData-1-22_tens_comp_bracketed_test.txt",    
+                            "rpn_llm/results/rope25M_1-22_tens_comp_bracketed_final_failures.txt")

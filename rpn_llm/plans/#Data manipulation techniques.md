@@ -189,3 +189,88 @@ trains well but suffers from same problem as 5-9s. if you give a number > 9-9s i
 
 ## 1-22 length numbers on Compressed scratchpad on Ten's complement
 Increase length of numbers to 22. 0-3 spaces added before numbers and operator. 
+Trained from scratch. 
+
+## Results:
+<pre>
+81% accuracy. 
+Total Evaluated: 18864
+Total Correct: 15292
+Total Failures: 3572
+Accuracy: 81.06%
+
+--- Breakdown by Carry Operations ---
+Carries | Total   | Correct | Failures | Accuracy
+0       | 11623   | 8858    | 2765    | 76.21%
+1       | 1355    | 975     | 380     | 71.96%
+2       | 1032    | 817     | 215     | 79.17%
+3       | 850     | 750     | 100     | 88.24%
+4       | 794     | 731     | 63      | 92.07%
+5       | 703     | 678     | 25      | 96.44%
+6       | 677     | 668     | 9       | 98.67%
+7       | 618     | 612     | 6       | 99.03%
+8       | 466     | 463     | 3       | 99.36%
+9       | 352     | 350     | 2       | 99.43%
+10      | 212     | 211     | 1       | 99.53%
+11      | 113     | 112     | 1       | 99.12%
+12      | 46      | 46      | 0       | 100.00%
+13      | 21      | 19      | 2       | 90.48%
+14      | 2       | 2       | 0       | 100.00%
+
+--- Edge Case Analysis ---
+Category         | Total    | Correct  | Accuracy
+zero_operand     | 254      | 148      | 58.27%
+negative_result  | 2380     | 1433     | 60.21%
+normal           | 16287    | 13742    | 84.37%
+</pre>
+
+
+## Replace all spaces and bracket numbers in prompt. 1-22 length numbers on Compressed scratchpad on Ten's complement
+example:  (10920155782176418)(30417522173842868)+=
+
+## Results: 96.06% 
+Only failures are for 16, 17 length where model skipped prefix (started with :)
+Happens as it is sees too many = signs.
+<pre>
+Validation Accuracy: 96.06% (16134/16795)
+=========================================
+
+
+--- Breakdown by Prompt Length ---
+Token Length | Total Items | Accuracy
+ 8 | 2161       | 100.00%
+ 9 | 4308       | 100.00%
+10 | 6559       | 100.00%
+11 | 8719       | 100.00%
+12 | 10601      | 99.80%
+13 | 12782      | 100.00%
+14 | 15212      | 100.00%
+15 | 17507      | 100.00%
+16 | 19528      | 99.80%
+17 | 21928      | 100.00%
+18 | 23989      | 99.80%
+19 | 26017      | 99.80%
+20 | 27444      | 99.80%
+21 | 28199      | 100.00%
+22 | 29300      | 99.80%
+23 | 30473      | 99.61%
+24 | 31366      | 99.80%
+25 | 32777      | 100.00%
+26 | 33622      | 99.61%
+27 | 31787      | 99.41%
+28 | 28495      | 99.61%
+29 | 26139      | 99.22%
+30 | 23787      | 99.02%
+31 | 21814      | 99.02%
+32 | 18168      | 96.48%
+33 | 16256      | 92.77%
+34 | 14791      | 88.09%
+35 | 11897      | 87.30%
+36 | 10396      | 83.79%
+37 | 6603       | 80.08%
+38 | 4797       | 80.08%
+39 | 3128       | 80.66%
+40 | 411        | 84.43%
+</pre>
+
+## Replace = sign with ? in prommpt

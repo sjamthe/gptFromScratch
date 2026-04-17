@@ -49,7 +49,7 @@ class RPNDataset(Dataset):
         carry = 0
         
         if op == '+':
-            prefix = f"<{a_rev} {b_rev}{op}=:"
+            prefix = f"<({a_rev})({b_rev}){op}=:"
             derived_digits = []
             for i in range(max_len):
                 d_a = int(a_rev[i]) if i < len(a_rev) else 0
@@ -72,7 +72,7 @@ class RPNDataset(Dataset):
             return f"{prefix}{scratchpad_math}:{ans_rev}>{ans_str}"
             
         elif op == '-':
-            prefix = f"<{a_rev} {b_rev}{op}=:"
+            prefix = f"<({a_rev})({b_rev}){op}=:"
             derived_digits = []
             for i in range(max_len):
                 d_a = int(a_rev[i]) if i < len(a_rev) else 0
@@ -142,7 +142,8 @@ class RPNDataset(Dataset):
                 
             str_a = str(a)
             str_b = str(b)
-            prompt_str = f"{rs0()}{str_a} {rs0()}{str_b}{rs0()}{op}{rs0()}={rs0()}"
+            # Parenthesized prompt with NO spaces
+            prompt_str = f"({str_a})({str_b}){op}="
             result_str = self._generate_scratchpad(str_a, str_b, op)
             full_line = f"{prompt_str}{result_str}"
 
@@ -171,7 +172,7 @@ if __name__ == "__main__":
     )
     
     print("Generating Training Data (Mixed-Scale 1-22 digits)...")
-    file_path_prefix = "rpn_llm/data/RPNData-mixed-1-22_tens_comp"
+    file_path_prefix = "rpn_llm/data/RPNData-1-22_tens_comp_bracketed"
     train_f = open(file_path_prefix + "_train.txt", 'w', encoding='utf-8')
     val_f = open(file_path_prefix + "_val.txt", 'w', encoding='utf-8')
     test_f = open(file_path_prefix + "_test.txt", 'w', encoding='utf-8')
