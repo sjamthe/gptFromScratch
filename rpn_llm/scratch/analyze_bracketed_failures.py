@@ -22,7 +22,7 @@ def analyze_bracketed_failures(file_path):
             prompt, expected_ans, pred_ans, full_exp, full_pred = match.groups()
             
             # Get operand lengths
-            m = re.search(r"\((\d+)\)\((\d+)\)([+\-])=", prompt)
+            m = re.search(r"\((\d+)\)\((\d+)\)([+\-])\?", prompt)
             if m:
                 l1, l2 = len(m.group(1)), len(m.group(2))
                 len_pair_stats[(l1, l2)]["failures"] += 1

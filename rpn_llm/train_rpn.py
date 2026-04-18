@@ -40,8 +40,8 @@ def run_teacher_forcing_validation(model, val_loader, device, step):
             preds = torch.argmax(logits, dim=-1)
             
             # 1. Global Token-Level Accuracy
-            # Mask out non-content tokens (UNK, NL, PAD)
-            valid_mask = (y_val != unk_id) & (y_val != nl_id) & (y_val != pad_id)
+            # Mask out non-content tokens (UNK, NL, PAD) and non-target tokens (-100)
+            valid_mask = (y_val != unk_id) & (y_val != nl_id) & (y_val != pad_id) & (y_val != -100)
             val_token_correct_accum += ((preds == y_val) & valid_mask).sum().item()
             val_token_target_accum += valid_mask.sum().item()
 
@@ -95,7 +95,7 @@ def run_generation_validation(model, val_loader, device, step, num_batches=4):
     This is slower, so we only run it on a few batches.
     """
     tokenizer = RPNTokenizer("rpn_llm/rpn-tokenizer.json")
-    eq_id = tokenizer.encode("=")[0]
+    sep_id = tokenizer.encode("?")[0]
     gt_id = tokenizer.encode(">")[0]
     nl_id = tokenizer.encode("\n")[0]
     
@@ -110,24 +110,20 @@ def run_generation_validation(model, val_loader, device, step, num_batches=4):
             batch_size = x_val.size(0)
             
             for b in range(batch_size):
-                # Since the stream is packed, find the first '=' in this sequence
                 row_x = x_val[b].tolist()
                 row_y = y_val[b].tolist()
-                
                 try:
-                    eq_pos = row_x.index(eq_id)
+                    sep_pos = row_x.index(sep_id)
                 except ValueError:
                     continue # No prompt start in this slice
                 
-                # The prompt is everything up to '='
-                prompt_tokens = torch.tensor(row_x[:eq_pos+1], dtype=torch.long, device=device).unsqueeze(0)
+                # The prompt is everything up to '?'
+                prompt_tokens = torch.tensor(row_x[:sep_pos+1], dtype=torch.long, device=device).unsqueeze(0)
                 
-                # Find the target answer in the ground truth
-                # We need to find the newline AFTER this eq_pos
                 try:
-                    # In y_val, the first token is x_val[1], so eq_pos in x is eq_pos-1 in y if we align.
-                    # Actually, y_val is just x_val shifted. y[eq_pos] is the token after x[eq_pos].
-                    targets_shifted = row_y[eq_pos:]
+                    # In y_val, the first token is x_val[1], so sep_pos in x is sep_pos-1 in y if we align.
+                    # Actually, y_val is just x_val shifted. y[sep_pos] is the token after x[sep_pos].
+                    targets_shifted = row_y[sep_pos:]
                     nl_pos_in_targets = targets_shifted.index(nl_id)
                     full_target_seq = targets_shifted[:nl_pos_in_targets]
                 except ValueError:

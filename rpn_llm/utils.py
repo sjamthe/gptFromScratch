@@ -78,7 +78,7 @@ class DataLoaderLite:
         # Encode line by line to be safer with memory
         all_tokens = []
         all_masks = []
-        eq_id = self.tokenizer.encode("=")[0]
+        sep_id = self.tokenizer.encode("?")[0]
         nl_id = self.tokenizer.encode("\n")[0]
         
         print("Tokenizing and building mask...")
@@ -92,7 +92,7 @@ class DataLoaderLite:
                     if t == nl_id: is_answer = False
                 else:
                     line_mask.append(0)
-                    if t == eq_id: is_answer = True
+                    if t == sep_id: is_answer = True
             
             all_tokens.extend(line_tokens)
             all_masks.extend(line_mask)

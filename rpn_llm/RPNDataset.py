@@ -143,7 +143,7 @@ class RPNDataset(Dataset):
             str_a = str(a)
             str_b = str(b)
             # Parenthesized prompt with NO spaces
-            prompt_str = f"({str_a})({str_b}){op}="
+            prompt_str = f"({str_a})({str_b}){op}?"
             result_str = self._generate_scratchpad(str_a, str_b, op)
             full_line = f"{prompt_str}{result_str}"
 

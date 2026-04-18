@@ -62,23 +62,21 @@ def validate_model(checkpoint_path, test_file_path, output_fail_path):
     # 3. Group by prompt token length to avoid padding issues
     # A prompt is everything up to and including the '=' sign and the trailing space. 
     length_groups = defaultdict(list)
-    eq_id = tokenizer.encode("=")[0]
+    eq_id = tokenizer.encode("?")[0]
     nl_id = tokenizer.encode("\n")[0]
     
     print("Grouping by prompt length...")
     for line in lines:
-        if "=" not in line:
+        if "?" not in line:
             continue
         
-        # Find index of '='
+        # Find index of '?'
         try:
-            eq_idx = line.index("=")
+            sep_idx = line.index("?")
         except ValueError:
             continue
             
-        # Strip ONLY trailing whitespace to preserve carefully injected leading spaces
-        # because the validation loop tensors dynamically depend on strict uniform lengths!
-        length_groups[eq_idx + 1].append(line.rstrip())
+        length_groups[sep_idx + 1].append(line.rstrip())
         
     # free lines memory
     del lines
@@ -134,12 +132,12 @@ def validate_model(checkpoint_path, test_file_path, output_fail_path):
             
             for line_str in batch_items:
                 line_tokens = tokenizer.encode(line_str)
-                eq_idx = line_tokens.index(eq_id)
-                prompt_tokens = line_tokens[:eq_idx + 1]
+                sep_idx = line_tokens.index(eq_id)
+                prompt_tokens = line_tokens[:sep_idx + 1]
                 
                 batch_prompt_tokens.append(prompt_tokens)
                 prompt_strs.append(tokenizer.decode(prompt_tokens).strip())
-                expected_strs.append(line_str.split('=', 1)[1].strip())
+                expected_strs.append(line_str.split('?', 1)[1].strip())
             
             # Construct (B, L) tensor natively (no padding required because all logic lengths identically match)
             prompts = torch.tensor(batch_prompt_tokens, dtype=torch.long, device=device)
@@ -191,8 +189,8 @@ def validate_model(checkpoint_path, test_file_path, output_fail_path):
                 predicted_str = tokenizer.decode(gen_answer_tokens).strip() 
                 prompt_str = prompt_strs[b]
                 
-                # New regex-based operand extraction for (n1)(n2)op= format
-                m = re.search(r"\((\d+)\)\((\d+)\)([+\-])=?", prompt_str)
+                # New regex-based operand extraction for (n1)(n2)op? format
+                m = re.search(r"\((\d+)\)\((\d+)\)([+\-])\?", prompt_str)
                 
                 expected_ans_str = expected_str.split('>')[-1].split('[UNK]')[0].split('\n')[0].strip() if '>' in expected_str else ""
                 predicted_ans_str = predicted_str.split('>')[-1].split('[UNK]')[0].split('\n')[0].strip() if '>' in predicted_str else ""

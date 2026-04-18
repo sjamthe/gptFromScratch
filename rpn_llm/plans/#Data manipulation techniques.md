@@ -274,3 +274,10 @@ Token Length | Total Items | Accuracy
 </pre>
 
 ## Replace = sign with ? in prommpt
+**Example:** 
+<pre>
+(3037913)(48)+?<(3197303)(84)+=:3+8+0=1:1+4+1=6:9+0+0=9:7+0+0=7:3+0+0=3:0+0+0=0:3+0+0=3:1697303>3037961
+</pre>
+
+### Results: Accuracy: 99.99% (16827/16828)
+only 1 failure. 
