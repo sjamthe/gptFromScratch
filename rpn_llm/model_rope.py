@@ -4,6 +4,7 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 import inspect
+import math
 
 @dataclass
 class GPTConfig:
@@ -52,7 +53,7 @@ class CausalSelfAttention(nn.Module):
         self.n_embd = config.n_embd
         # No absolute bias mask initialization needed for flash attention
     
-    def forward(self, x: torch.Tensor, freqs_cis: torch.Tensor, use_cache: bool = False, cache_state: tuple = None) -> tuple[torch.Tensor, tuple]:
+    def forward(self, x: torch.Tensor, freqs_cis: torch.Tensor, use_cache: bool = False, cache_state: tuple = None, return_attention: bool = False) -> tuple:
         B, T, C = x.size()
         qkv = self.c_attn(x)
         q,k,v = qkv.split(self.n_embd, dim=2)
@@ -86,11 +87,31 @@ class CausalSelfAttention(nn.Module):
 
         # Flash attention handles custom causality correctly when queries run dynamically token-by-token
         is_causal = (T > 1) 
-        y = F.scaled_dot_product_attention(q, k, v, is_causal=is_causal)
+        attn_weights = None
+        
+        if return_attention:
+            # Manual attention to capture weights (Flash Attention hides them)
+            # (B, nh, T, hs) @ (B, nh, hs, T_total) -> (B, nh, T, T_total)
+            att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
+            if is_causal:
+                # Apply causal mask manually
+                # Create mask based on actual sequence indices
+                # k.size(2) is the total key length (T_old + T_new)
+                # T is the new query length
+                # We need to mask out tokens where key_index > query_index
+                q_idx = torch.arange(offset, offset + T, device=x.device).view(-1, 1)
+                k_idx = torch.arange(k.size(2), device=x.device).view(1, -1)
+                mask = q_idx < k_idx
+                att = att.masked_fill(mask, float('-inf'))
+            
+            attn_weights = F.softmax(att, dim=-1)
+            y = attn_weights @ v
+        else:
+            y = F.scaled_dot_product_attention(q, k, v, is_causal=is_causal)
 
         y = y.transpose(1, 2).contiguous().view(B, T, C)
         y = self.c_proj(y)
-        return y, cache_state
+        return y, cache_state, attn_weights
 
 class MLP(nn.Module):
     def __init__(self, config: GPTConfig):
@@ -113,11 +134,11 @@ class Block(nn.Module):
         self.ln_2 = nn.LayerNorm(config.n_embd)
         self.mlp = MLP(config)
     
-    def forward(self, x: torch.Tensor, freqs_cis: torch.Tensor, use_cache: bool = False, cache_state: tuple = None) -> tuple[torch.Tensor, tuple]:
-        attn_out, cache_out = self.attn(self.ln_1(x), freqs_cis, use_cache=use_cache, cache_state=cache_state)
+    def forward(self, x: torch.Tensor, freqs_cis: torch.Tensor, use_cache: bool = False, cache_state: tuple = None, return_attention: bool = False) -> tuple:
+        attn_out, cache_out, weights = self.attn(self.ln_1(x), freqs_cis, use_cache=use_cache, cache_state=cache_state, return_attention=return_attention)
         x = x + attn_out
         x = x + self.mlp(self.ln_2(x))
-        return x, cache_out
+        return x, cache_out, weights
 
 class GPT(nn.Module):
     
@@ -152,7 +173,7 @@ class GPT(nn.Module):
         elif isinstance(module, nn.Embedding):
             torch.nn.init.normal_(module.weight, mean=0.0, std=.02)
         
-    def forward(self, idx: torch.Tensor, targets: torch.Tensor = None, use_cache: bool = False, past_key_values: list = None) -> tuple:
+    def forward(self, idx: torch.Tensor, targets: torch.Tensor = None, use_cache: bool = False, past_key_values: list = None, return_attention: bool = False) -> tuple:
         B, T = idx.size()
 
         x = self.transformer.wte(idx)
@@ -160,11 +181,14 @@ class GPT(nn.Module):
         freqs_cis = self.freqs_cis
         present_key_values = [] if use_cache else None
         
+        all_weights = [] if return_attention else None
         for i, block in enumerate(self.transformer.h):
             cache_in = past_key_values[i] if past_key_values is not None else None
-            x, cache_out = block(x, freqs_cis, use_cache=use_cache, cache_state=cache_in)
+            x, cache_out, weights = block(x, freqs_cis, use_cache=use_cache, cache_state=cache_in, return_attention=return_attention)
             if use_cache:
                 present_key_values.append(cache_out)
+            if return_attention:
+                all_weights.append(weights)
             
         x = self.transformer.ln_f(x)
         
@@ -174,6 +198,9 @@ class GPT(nn.Module):
             loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1))
         else:
             logits = self.lm_head(x[:, [-1], :])
+            
+        if return_attention:
+            return logits, loss, present_key_values, all_weights
             
         if use_cache:
             return logits, loss, present_key_values
