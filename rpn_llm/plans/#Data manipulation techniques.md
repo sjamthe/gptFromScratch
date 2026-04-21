@@ -281,3 +281,54 @@ Token Length | Total Items | Accuracy
 
 ### Results: Accuracy: 99.99% (16827/16828)
 only 1 failure. 
+
+
+# Universal Transformer
+Use the same dataset as above but train universal transformer.
+
+**Universal Transfoemer** has same weights for all the blocks. 
+This reduces the number of parameters and allows the model to generalize better.
+
+## Results:
+<pre>
+Validation Accuracy: 99.45% (16736/16828)
+=========================================
+
+
+--- Breakdown by Prompt Length ---
+Token Length | Total Items | Accuracy
+ 8 | 2114       | 88.87%
+ 9 | 4345       | 100.00%
+10 | 6619       | 99.80%
+11 | 8755       | 100.00%
+12 | 11120      | 100.00%
+13 | 13158      | 100.00%
+14 | 15269      | 100.00%
+15 | 17176      | 100.00%
+16 | 19768      | 100.00%
+17 | 21752      | 100.00%
+18 | 23904      | 100.00%
+19 | 26167      | 100.00%
+20 | 27082      | 100.00%
+21 | 28470      | 100.00%
+22 | 29484      | 99.41%
+23 | 30488      | 100.00%
+24 | 31290      | 99.80%
+25 | 32436      | 99.61%
+26 | 33603      | 99.61%
+27 | 31632      | 99.22%
+28 | 28228      | 99.80%
+29 | 26066      | 99.80%
+30 | 23298      | 99.80%
+31 | 21551      | 100.00%
+32 | 18018      | 99.80%
+33 | 16374      | 99.80%
+34 | 14604      | 100.00%
+35 | 12006      | 99.80%
+36 | 10305      | 99.80%
+37 | 6491       | 99.61%
+38 | 4918       | 100.00%
+39 | 3000       | 99.61%
+40 | 444        | 97.52%
+</pre>
+

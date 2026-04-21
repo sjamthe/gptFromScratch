@@ -1,42 +1,56 @@
+import torch
 import os
 import sys
-import torch
 
-# Add the parent directory (rpn_llm) to the path so we can import model_rope
+# Add parent dir to path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from model_rope import GPT
 from utils import RPNTokenizer
 
-def scout_attention(checkpoint_path, prompt_str):
-    device = 'cuda' if torch.cuda.is_available() else 'mps' if torch.backends.mps.is_available() else 'cpu'
-    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
+def scout():
+    device = 'cpu'
+    ckpt_path = "/Users/sjamthe/Documents/GithubRepos/gptFromScratch/rpn_llm/models/UT3M_1-22_tens_comp_bracketed_final.pt"
+    prompt = "(123)(456)+?<(32"
+    
+    checkpoint = torch.load(ckpt_path, map_location=device, weights_only=False)
     model = GPT(checkpoint['config'])
     model.load_state_dict(checkpoint['model'])
-    model.to(device); model.eval()
-    tokenizer = RPNTokenizer("rpn_llm/rpn-tokenizer.json")
+    model.to(device)
+    tokenizer = RPNTokenizer("/Users/sjamthe/Documents/GithubRepos/gptFromScratch/rpn_llm/rpn-tokenizer.json")
     
-    tokens = tokenizer.encode(prompt_str)
-    x = torch.tensor([tokens], device=device)
-    token_labels = [tokenizer.decode([t]) for t in tokens]
+    tokens = tokenizer.encode(prompt)
+    idx = torch.tensor([tokens], device=device)
     
-    # Target: The '1' in (123) is at index 1
-    target_idx = 27
-    print(f"Scouting attention for target token '{token_labels[target_idx]}' (Index {target_idx})")
+    # Run model return_attention=True
+    # GPT.forward returns: logits, loss, present_key_values, all_weights
+    _, _, _, all_weights = model(idx, return_attention=True)
     
-    with torch.no_grad():
-        _, _, _, all_weights = model(x, return_attention=True)
+    # all_weights is a list of weights (one per pass)
+    # each element has shape (B, Heads, T, T)
+    num_passes = len(all_weights)
+    T = all_weights[0].shape[3]
+    last_idx = T - 1 # Index 15 for '2'
+    
+    decoded_tokens = [tokenizer.decode([t]) for t in tokens]
+    
+    # We compare indices 14 ('3') and 15 ('2')
+    indices_to_check = [14, 15]
+    
+    for target_idx in indices_to_check:
+        token_char = decoded_tokens[target_idx]
+        print(f"\nREVERSAL LOGIC: Analyzing Token @ Index {target_idx} ('{token_char}')")
+        print("="*60)
         
-    for layer_idx, layer_weights in enumerate(all_weights):
-        # layer_weights is (1, nh, T, T)
-        # We look at the LAST generated token (the most recent one)
-        last_query_idx = len(tokens) - 1
-        head_scores = layer_weights[0, :, last_query_idx, target_idx] # (nh,)
-        
-        max_head = torch.argmax(head_scores).item()
-        max_val = head_scores[max_head].item()
-        
-        print(f"Layer {layer_idx+1}: Max focus on {target_idx} is Head {max_head+1} with {max_val:.4f} score")
-        
+        for p in [2, 4, 7]: # Checking Beginning, Middle, and End of reasoning
+            print(f"Pass {p+1}:")
+            avg_weights = all_weights[p][0].mean(dim=0)
+            attn_for_target = avg_weights[target_idx]
+            
+            top_vals, top_indices = torch.topk(attn_for_target, k=5)
+            for val, idx in zip(top_vals, top_indices):
+                token_str = decoded_tokens[idx.item()]
+                print(f"  -> {val.item():.4f} focusing on: '{token_str}' (Index {idx.item()})")
+            
 if __name__ == "__main__":
-    scout_attention("rpn_llm/models/rope25M_1-22_tens_comp_bracketed_final.pt", "(123)(456)+?<(321)(654)+=:3+6+0=")
+    scout()

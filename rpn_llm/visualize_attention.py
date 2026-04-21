@@ -70,13 +70,23 @@ def visualize_attention(checkpoint_path, prompt_str, output_path="rpn_llm/inspec
     # --- LOGIT LENS ---
     html_out += "<div class='layer-box'><h2>Logit Lens (Internal State Predictions)</h2>"
     html_out += "<table border='1' cellpadding='8' style='border-collapse: collapse; width: 100%; background: white;'>"
-    html_out += "<tr><th>Layer</th><th>Top 3 Guesses for Next Token</th></tr>"
+    html_out += "<tr><th>Pass / Layer</th><th>Top 3 Guesses for Next Token</th></tr>"
     
     h = x
     h = model.transformer.wte(h)
     freq_cis = model.freqs_cis
-    for i, block in enumerate(model.transformer.h):
-        h, _, _ = block(h, freq_cis, return_attention=False)
+    
+    # Universal vs Sequential loop
+    num_passes = config.n_layer
+    for i in range(num_passes):
+        if config.universal:
+            # Universal mode: add pass embedding and use shared block
+            h = h + model.pass_emb[i].view(1, 1, -1)
+            h, _, _ = model.transformer.h(h, freq_cis, return_attention=False)
+        else:
+            # Sequential mode
+            h, _, _ = model.transformer.h[i](h, freq_cis, return_attention=False)
+            
         temp_logits = model.lm_head(model.transformer.ln_f(h))
         last_tok = temp_logits[0, -1, :]
         probs = F.softmax(last_tok, dim=-1)
@@ -87,7 +97,8 @@ def visualize_attention(checkpoint_path, prompt_str, output_path="rpn_llm/inspec
             token = tokenizer.decode([idx.item()])
             guesses.append(f"<b style='color: #d32f2f'>'{token}'</b> ({val.item()*100:.1f}%)")
         
-        html_out += f"<tr><td>Layer {i+1}</td><td>{' | '.join(guesses)}</td></tr>"
+        label = f"Pass {i+1}" if config.universal else f"Layer {i+1}"
+        html_out += f"<tr><td>{label}</td><td>{' | '.join(guesses)}</td></tr>"
     html_out += "</table></div>"
     
     # --- ATTENTION MAPS ---
@@ -116,6 +127,6 @@ def visualize_attention(checkpoint_path, prompt_str, output_path="rpn_llm/inspec
 
 if __name__ == "__main__":
     import sys
-    ckpt = sys.argv[2] if len(sys.argv) > 2 else "rpn_llm/models/rope25M_1-22_tens_comp_bracketed_final.pt"
-    prompt = sys.argv[1] if len(sys.argv) > 1 else "(123)(456)+?<(" # Example
+    ckpt = sys.argv[2] if len(sys.argv) > 2 else "rpn_llm/models/UT3M_1-22_tens_comp_bracketed_final.pt"
+    prompt = sys.argv[1] if len(sys.argv) > 1 else "(123)(456)+?<(32" # Example
     visualize_attention(ckpt, prompt)

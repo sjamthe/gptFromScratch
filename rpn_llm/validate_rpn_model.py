@@ -39,7 +39,7 @@ def calculate_carries(a_str, b_str, op):
                 carry_val = 0
     return carries
 
-def validate_model(checkpoint_path, test_file_path, output_fail_path):
+def validate_model(checkpoint_path, test_file_path, output_fail_path, num_passes=None, early_stop=None):
     device = 'cuda' if torch.cuda.is_available() else 'mps' if torch.backends.mps.is_available() else 'cpu'
     print(f"Using device: {device}")
 
@@ -154,7 +154,7 @@ def validate_model(checkpoint_path, test_file_path, output_fail_path):
                 
                 with torch.no_grad():
                     with torch.autocast(device, dtype=torch.bfloat16):
-                        logits, _, past_kv = model(idx_cond, use_cache=True, past_key_values=past_kv)
+                        logits, _, past_kv = model(idx_cond, use_cache=True, past_key_values=past_kv, num_passes=num_passes, halt_on_logit_stability=early_stop)
                 
                 logits = logits[:, -1, :] # Pluck final step logits
                 idx_next = torch.argmax(logits, dim=-1, keepdim=True) # Deterministic greedy decision
@@ -289,7 +289,14 @@ def validate_model(checkpoint_path, test_file_path, output_fail_path):
     print(f"\nFailures dumped to {output_fail_path}")
 
 if __name__ == "__main__":
-    import sys
-    model_path = sys.argv[1] if len(sys.argv) > 1 else "rpn_llm/models/rope25M_1-22_tens_comp_bracketed_final.pt"
-    validate_model(model_path, "rpn_llm/data/RPNData-1-22_tens_comp_bracketed_test.txt",    
-                            "rpn_llm/results/rope25M_1-22_tens_comp_bracketed_final_failures.txt")
+    import argparse
+    parser = argparse.ArgumentParser(description="Validate RPN Transformer")
+    parser.add_argument("--model", type=str, default="rpn_llm/models/UT3M_1-22_tens_comp_bracketed_final.pt", help="Path to checkpoint")
+    parser.add_argument("--test_file", type=str, default="rpn_llm/data/RPNData-1-22_tens_comp_bracketed_test.txt", help="Path to test file")
+    parser.add_argument("--output_file", type=str, default="rpn_llm/results/UT3M_6_passes_validation_failures.txt", help="Path to output failure file")
+    parser.add_argument("--num_passes", type=int, default=None, help="Force number of universal passes")
+    parser.add_argument("--early_stop", type=int, default=None, help="Stop if logit is stable for N passes")
+    
+    args = parser.parse_args()
+
+    validate_model(args.model, args.test_file, args.output_file, num_passes=args.num_passes, early_stop=args.early_stop)

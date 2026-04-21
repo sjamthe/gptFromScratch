@@ -13,6 +13,7 @@ class GPTConfig:
     n_layer: int = 8 # number of transformer blocks
     n_head: int = 8 # number of attention heads
     n_embd: int = 512 # embedding dimension
+    universal: bool = False # if True, all layers share same weights
 
 # --- RoPE Implementation ---
 def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0):
@@ -146,12 +147,20 @@ class GPT(nn.Module):
         super().__init__()
         self.config = config
         
+        
         self.transformer = nn.ModuleDict({
             'wte': nn.Embedding(config.vocab_size, config.n_embd),
-            # 'wpe' is completely removed!
-            'h': nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
             'ln_f': nn.LayerNorm(config.n_embd),
         })
+        
+        if config.universal:
+            self.transformer.h = Block(config)
+            # Learned "Pass" (Coordinate) embeddings (one for each iteration)
+            self.pass_emb = nn.Parameter(torch.randn(config.n_layer, config.n_embd) * 0.02)
+        else:
+            self.transformer.h = nn.ModuleList([Block(config) for _ in range(config.n_layer)])
+            self.pass_emb = None
+
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
         self.transformer.wte.weight = self.lm_head.weight
         
@@ -173,7 +182,7 @@ class GPT(nn.Module):
         elif isinstance(module, nn.Embedding):
             torch.nn.init.normal_(module.weight, mean=0.0, std=.02)
         
-    def forward(self, idx: torch.Tensor, targets: torch.Tensor = None, use_cache: bool = False, past_key_values: list = None, return_attention: bool = False) -> tuple:
+    def forward(self, idx: torch.Tensor, targets: torch.Tensor = None, use_cache: bool = False, past_key_values: list = None, return_attention: bool = False, num_passes: int = None, halt_threshold: float = None, halt_on_logit_stability: int = None) -> tuple:
         B, T = idx.size()
 
         x = self.transformer.wte(idx)
@@ -182,13 +191,79 @@ class GPT(nn.Module):
         present_key_values = [] if use_cache else None
         
         all_weights = [] if return_attention else None
-        for i, block in enumerate(self.transformer.h):
-            cache_in = past_key_values[i] if past_key_values is not None else None
-            x, cache_out, weights = block(x, freqs_cis, use_cache=use_cache, cache_state=cache_in, return_attention=return_attention)
-            if use_cache:
-                present_key_values.append(cache_out)
-            if return_attention:
-                all_weights.append(weights)
+        
+        # Universal vs Sequential loop
+        if self.config.universal:
+            # Dynamic Depth: Allow overriding number of passes at inference
+            max_passes = num_passes if num_passes is not None else self.config.n_layer
+            prev_x = None
+            
+            # For logit stability tracking
+            stable_token = None
+            stable_count = 0
+            
+            for i in range(max_passes):
+                # Cycle pass_emb if we exceed trained depth
+                emb_idx = i % self.config.n_layer
+                x = x + self.pass_emb[emb_idx].view(1, 1, -1)
+                
+                # Each pass in the universal loop gets its own KV cache entry
+                cache_idx = i
+                cache_in = past_key_values[cache_idx] if (past_key_values is not None and cache_idx < len(past_key_values)) else None
+                x, cache_out, weights = self.transformer.h(x, freqs_cis, use_cache=use_cache, cache_state=cache_in, return_attention=return_attention)
+                
+                if use_cache:
+                    present_key_values.append(cache_out)
+                if return_attention:
+                    all_weights.append(weights)
+                
+                # --- Logit Stability Halting ---
+                if halt_on_logit_stability is not None:
+                    # Project current state to logits for the LAST token only
+                    # This tells us the model's current "best guess"
+                    with torch.no_grad():
+                        last_x = self.transformer.ln_f(x[:, -1, :])
+                        current_logits = self.lm_head(last_x)
+                        current_token = torch.argmax(current_logits, dim=-1)
+                    
+                    if stable_token is not None and (current_token == stable_token).all():
+                        stable_count += 1
+                    else:
+                        stable_token = current_token
+                        stable_count = 1
+                    
+                    if stable_count >= halt_on_logit_stability:
+                        # Logit is stable! Pad and break.
+                        if use_cache:
+                            for _ in range(i + 1, max_passes):
+                                present_key_values.append(cache_out)
+                        if return_attention:
+                            for _ in range(i + 1, max_passes):
+                                all_weights.append(weights)
+                        break
+
+                # --- Early Stopping (Distance-based) ---
+                if halt_threshold is not None and prev_x is not None:
+                    diff = torch.norm(x - prev_x, p=2, dim=-1).mean()
+                    if diff < halt_threshold:
+                        if use_cache:
+                            for _ in range(i + 1, max_passes):
+                                present_key_values.append(cache_out)
+                        if return_attention:
+                            for _ in range(i + 1, max_passes):
+                                all_weights.append(weights)
+                        break
+                
+                prev_x = x
+        else:
+            # Standard model: num_passes/halt_threshold is ignored
+            for i, block in enumerate(self.transformer.h):
+                cache_in = past_key_values[i] if past_key_values is not None else None
+                x, cache_out, weights = block(x, freqs_cis, use_cache=use_cache, cache_state=cache_in, return_attention=return_attention)
+                if use_cache:
+                    present_key_values.append(cache_out)
+                if return_attention:
+                    all_weights.append(weights)
             
         x = self.transformer.ln_f(x)
         

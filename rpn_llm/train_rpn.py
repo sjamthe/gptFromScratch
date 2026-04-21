@@ -200,7 +200,10 @@ def train_rpn_llm(start_step=0, checkpoint_path=None):
     n_embd = 512
     
     # Initialize natively tracking deeply scaled logic limits
-    model = GPT(GPTConfig(vocab_size=64, n_layer=n_layer, n_head=n_head, n_embd=n_embd, block_size=2048))
+    universal_mode = True
+    prefix = "UT3M" if universal_mode else "rope25M"
+    run_name = f"{prefix}_1-22_tens_comp_bracketed"
+    model = GPT(GPTConfig(vocab_size=64, n_layer=n_layer, n_head=n_head, n_embd=n_embd, block_size=2048, universal=universal_mode))
     model.to(device)
     if device == 'cuda':
         model = torch.compile(model)
@@ -223,7 +226,7 @@ def train_rpn_llm(start_step=0, checkpoint_path=None):
     
     wandb.init(
         project="rpn-llm",
-        name="rope25M_1-22_tens_comp_bracketed",
+        name=f"{run_name}",
         config={
             "total_batch_size": total_batch_size,
             "B": B,
@@ -309,12 +312,12 @@ def train_rpn_llm(start_step=0, checkpoint_path=None):
                 'step': step,
                 'train_loader': train_loader,
             }
-            torch.save(checkpoint, f'rpn_llm/models/rope25M_1-22_tens_comp_bracketed_{step+1}.pt')
-            print(f"Model checkpoint saved to rpn_llm/models/rope25M_1-22_tens_comp_bracketed_{step+1}.pt")
+            torch.save(checkpoint, f'rpn_llm/models/{run_name}_{step+1}.pt')
+            print(f"Model checkpoint saved to rpn_llm/models/{run_name}_{step+1}.pt")
    
     wandb.finish()
-    torch.save(checkpoint, f'rpn_llm/models/rope25M_1-22_tens_comp_bracketed_final.pt')
-    print(f"Model checkpoint saved to rpn_llm/models/rope25M_1-22_tens_comp_bracketed_final.pt")
+    torch.save(checkpoint, f'rpn_llm/models/{run_name}_final.pt')
+    print(f"Model checkpoint saved to rpn_llm/models/{run_name}_final.pt")
 
 if __name__ == "__main__":
     import sys
