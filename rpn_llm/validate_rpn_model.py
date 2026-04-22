@@ -99,9 +99,17 @@ def validate_model(checkpoint_path, test_file_path, output_fail_path, num_passes
     }
     
     # Max generation steps for an answer
-    # A padded 5-digit math evaluates to ~112 tokens dynamically, pushing past the bounds of 96 natively!
-    # For Ten's Complement subtraction, sequences can reach nearly 200 tokens.
     max_new_tokens = 256
+
+    # Enhanced Failure Categorization
+    failure_categories = {
+        'reversal_skipped': 0,
+        'reversal_failed': 0,
+        'math_failed': 0,
+        'final_ans_failed': 0,
+        'other': 0
+    }
+    reversal_fail_by_spaces = defaultdict(int) # Key: (s1_len, s2_len)
 
     total_items = sum(len(items) for items in length_groups.values())
     start_time = time.time()
@@ -190,7 +198,8 @@ def validate_model(checkpoint_path, test_file_path, output_fail_path, num_passes
                 prompt_str = prompt_strs[b]
                 
                 # New regex-based operand extraction for (n1)(n2)op? format
-                m = re.search(r"\((\d+)\)\((\d+)\)([+\-])\?", prompt_str)
+                # Enhanced regex to capture spaces: num1 [s1] num2 [s2] op ?
+                m = re.search(r"(\d+)(\s+)(\d+)(\s*)([+\-])\?", prompt_str)
                 
                 expected_ans_str = expected_str.split('>')[-1].split('[UNK]')[0].split('\n')[0].strip() if '>' in expected_str else ""
                 predicted_ans_str = predicted_str.split('>')[-1].split('[UNK]')[0].split('\n')[0].strip() if '>' in predicted_str else ""
@@ -198,7 +207,7 @@ def validate_model(checkpoint_path, test_file_path, output_fail_path, num_passes
                 carries = 0
                 is_zero = False
                 if m:
-                    n1_str, n2_str, op = m.groups()
+                    n1_str, _, n2_str, _, op = m.groups()
                     try:
                         p0_val = int(n1_str); p1_val = int(n2_str)
                         is_zero = (p0_val == 0 or p1_val == 0)
@@ -212,9 +221,43 @@ def validate_model(checkpoint_path, test_file_path, output_fail_path, num_passes
                 if is_zero: edge_stats['zero_operand']['total'] += 1
                 if is_neg: edge_stats['negative_result']['total'] += 1
                 if is_normal: edge_stats['normal']['total'] += 1
+
+                # Helper to split RPN parts
+                def split_rpn(s):
+                    # Find the operator-equal delimiter
+                    delim = "+=" if "+=" in s else "-=" if "-=" in s else None
+                    if delim:
+                        prefix = s.split(delim)[0] + delim
+                        rest = s.split(delim)[1]
+                    else:
+                        prefix = ""
+                        rest = s
+                    math = rest.split('>')[0] if '>' in rest else ""
+                    ans = s.split('>')[-1].split('[UNK]')[0].split('\n')[0].strip() if '>' in s else ""
+                    return prefix, math, ans
+
+                exp_pre, exp_math, exp_ans_final = split_rpn(expected_str)
+                pred_pre, pred_math, pred_ans_final = split_rpn(predicted_str)
                 
                 # Check absolute truth of final numerical output!
                 if expected_ans_str != predicted_ans_str:
+                    # Categorize failure
+                    s1 = m.group(2) if m else " "
+                    s2 = m.group(4) if m else ""
+                    space_key = (len(s1), len(s2))
+
+                    if not pred_pre or ('+=' not in predicted_str and '-=' not in predicted_str):
+                        failure_categories['reversal_skipped'] += 1
+                    elif pred_pre != exp_pre:
+                        failure_categories['reversal_failed'] += 1
+                        reversal_fail_by_spaces[space_key] += 1
+                    elif pred_math != exp_math:
+                        failure_categories['math_failed'] += 1
+                    elif expected_ans_str != predicted_ans_str:
+                        failure_categories['final_ans_failed'] += 1
+                    else:
+                        failure_categories['other'] += 1
+
                     # Document failure
                     fail_str = f"Q: {prompt_str} | Expected: {expected_ans_str} | Predicted: {predicted_ans_str} | Full Expected: {expected_str} | Full Pred: {predicted_str}"
                     failures.append(fail_str)
@@ -234,6 +277,8 @@ def validate_model(checkpoint_path, test_file_path, output_fail_path, num_passes
             group_accuracy = (group_total_correct / group_total_processed) * 100
             accuracy_by_length[length] = group_accuracy
             print(f"Progress: {total_processed}/{total_items} ({pct_complete:.2f}%) | Accuracy: {accuracy:.2f}% | Group {group_idx-1} Accuracy: {group_accuracy:.2f}% | Batch inference time: {batch_time:.2f}s | Tokens/sec: {tokens_per_sec:.1f}")
+            for cat, count in failure_categories.items():
+                print(f"{cat:<20}: {count}")
 
     # 5. Output Results
     accuracy = (total_correct / total_processed) * 100
@@ -285,15 +330,40 @@ def validate_model(checkpoint_path, test_file_path, output_fail_path, num_passes
         cor = stats['correct']
         acc = (cor / tot) * 100 if tot > 0 else 0
         print(f"{cat:<16} | {tot:<8} | {cor:<8} | {acc:.2f}%")
+
+    # Detailed Failure Analysis Output
+    print("\n--- Failure Category Breakdown ---")
+    total_fails = len(failures)
+    for cat, count in failure_categories.items():
+        pct = (count / total_fails * 100) if total_fails > 0 else 0
+        print(f"{cat:<20}: {count} ({pct:.1f}%)")
+    
+    if reversal_fail_by_spaces:
+        print("\n--- Reversal Failures vs Spaces (S1, S2) ---")
+        total_rev_fails = sum(reversal_fail_by_spaces.values())
+        for spaces, count in sorted(reversal_fail_by_spaces.items()):
+            pct = (count / total_rev_fails * 100) if total_rev_fails > 0 else 0
+            print(f"Spaces {spaces}: {count} failures ({pct:.1f}%)")
+
+    with open(output_fail_path, "a", encoding="utf-8") as f:
+        f.write("\n--- Failure Category Breakdown ---\n")
+        for cat, count in failure_categories.items():
+            pct = (count / total_fails * 100) if total_fails > 0 else 0
+            f.write(f"{cat:<20}: {count} ({pct:.1f}%)\n")
         
-    print(f"\nFailures dumped to {output_fail_path}")
+        if reversal_fail_by_spaces:
+            f.write("\n--- Reversal Failures vs Spaces (S1, S2) ---\n")
+            total_rev_fails = sum(reversal_fail_by_spaces.values())
+            for spaces, count in sorted(reversal_fail_by_spaces.items()):
+                pct = (count / total_rev_fails * 100) if total_rev_fails > 0 else 0
+                f.write(f"Spaces {spaces}: {count} failures ({pct:.1f}%)\n")
 
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(description="Validate RPN Transformer")
-    parser.add_argument("--model", type=str, default="rpn_llm/models/UT3M_1-22_tens_comp_bracketed_final.pt", help="Path to checkpoint")
-    parser.add_argument("--test_file", type=str, default="rpn_llm/data/RPNData-1-22_tens_comp_bracketed_test.txt", help="Path to test file")
-    parser.add_argument("--output_file", type=str, default="rpn_llm/results/UT3M_6_passes_validation_failures.txt", help="Path to output failure file")
+    parser.add_argument("--model", type=str, default="rpn_llm/models/UT3M_1-22_mixed_refresh_32000.pt", help="Path to checkpoint")
+    parser.add_argument("--test_file", type=str, default="rpn_llm/data/RPNData-1-22_balanced_refinement_test.txt", help="Path to test file")
+    parser.add_argument("--output_file", type=str, default="rpn_llm/results/UT3M_1-22_balanced_refinement_failures.txt", help="Path to output failure file")
     parser.add_argument("--num_passes", type=int, default=None, help="Force number of universal passes")
     parser.add_argument("--early_stop", type=int, default=None, help="Stop if logit is stable for N passes")
     

@@ -332,3 +332,120 @@ Token Length | Total Items | Accuracy
 40 | 444        | 97.52%
 </pre>
 
+## Train Reverseing first.
+Create a separate dataset that stops after reversing the numbers. Train the model on this dataset first. Then train the model on the full dataset.
+
+### Results of reversing
+Only 16,000 steps were enough to train to 100.00% accuracy
+
+At 16k training with full dataset accuracy dropped to 37% and almost all failures are related to reversal. looks like model forgot how to reverse.
+<pre>
+Validation Complete!
+Total Evaluated: 18233
+Total Correct: 6869
+Total Failures: 11364
+Accuracy: 37.67%
+
+--- Breakdown by Carry Operations ---
+Carries | Total   | Correct | Failures | Accuracy
+0       | 3218    | 403     | 2815    | 12.52%
+1       | 3451    | 528     | 2923    | 15.30%
+2       | 2469    | 626     | 1843    | 25.35%
+3       | 1909    | 697     | 1212    | 36.51%
+4       | 1526    | 727     | 799     | 47.64%
+5       | 1421    | 818     | 603     | 57.57%
+6       | 1200    | 806     | 394     | 67.17%
+7       | 1047    | 743     | 304     | 70.96%
+8       | 845     | 634     | 211     | 75.03%
+9       | 516     | 401     | 115     | 77.71%
+10      | 344     | 282     | 62      | 81.98%
+11      | 164     | 121     | 43      | 73.78%
+12      | 76      | 51      | 25      | 67.11%
+13      | 34      | 25      | 9       | 73.53%
+14      | 12      | 6       | 6       | 50.00%
+15      | 1       | 1       | 0       | 100.00%
+
+--- Edge Case Analysis ---
+Category         | Total    | Correct  | Accuracy
+zero_operand     | 418      | 31       | 7.42%
+negative_result  | 2378     | 7        | 0.29%
+normal           | 15542    | 6831     | 43.95%
+
+--- Failure Category Breakdown ---
+reversal_skipped    : 3 (0.0%)
+reversal_failed     : 11141 (98.0%)
+math_failed         : 199 (1.8%)
+final_ans_failed    : 21 (0.2%)
+other               : 0 (0.0%)
+
+--- Reversal Failures vs Spaces (S1, S2) ---
+Spaces (1, 0): 1856 failures (16.7%)
+Spaces (1, 1): 1448 failures (13.0%)
+Spaces (1, 2): 1139 failures (10.2%)
+Spaces (2, 0): 1301 failures (11.7%)
+Spaces (2, 1): 1134 failures (10.2%)
+Spaces (2, 2): 1021 failures (9.2%)
+Spaces (3, 0): 1137 failures (10.2%)
+Spaces (3, 1): 1071 failures (9.6%)
+Spaces (3, 2): 1034 failures (9.3%)
+</pre>
+
+## Modify dataset to handle short numbers
+1. **Biased Sampling**: Updated RPNDataset.py to sample shorter numbers (1–5 digits) 40% of the time. This forces the model to constantly practice "early exits" during the reversal phase.
+2. **Space Variation**: Increased the random space range from (0, 2) to (0, 5). This breaks any internal "fixed token clock" the model might have been using to track number length, forcing it to attend specifically to the operator/questions marks as decorators.
+
+Fine-tuning the model on the top of the above model.
+### Results for each 16,000 steps
+1.  Accuracy 77.8% at 16,000 steps. 
+<pre>
+reversal_failed     : 4368 (97.7%)
+math_failed         : 102 (2.3%)
+final_ans_failed    : 0 (0.0%)
+</pre>
+2. Accuracy 81.11% at 32,000 steps.
+<pre>
+reversal_failed     : 3795 (99.3%)
+math_failed         : 22 (0.6%)
+final_ans_failed    : 5 (0.1%)
+</pre>
+3. Accuracy 84.05% at 48,000 steps.
+<pre>
+reversal_failed     : 3215 (99.6%)
+math_failed         : 13 (0.4%)
+final_ans_failed    : 0 (0.0%)
+</pre>
+4. Accuracy 88.81% at 62,500 steps.
+<pre>
+reversal_failed     : 2259 (99.8%)
+math_failed         : 5 (0.2%)
+final_ans_failed    : 0 (0.0%)
+</pre>
+
+Results for prompt length 18-29 is lowest.
+
+## Reverse mixed refresh
+1. **Interleaved Dataset Generation**: Modified RPNDataset.py to generate a "Mixed Refresh" dataset.
+- **30% Reversal-Only samples**: These force the model to prioritize the scratchpad setup (the bottleneck).
+- **70% Full Math samples**: Keeps the 99%+ arithmetic logic fresh.
+- *Biased Sampling**: Maintained the 40% bias for short numbers (1–5 digits) to specifically target the weak prompt lengths (18–29 tokens).
+1. Training Script Update: Updated train_rpn.py to:
+Point to the new rpn_llm/data/RPNData-1-22_mixed_refresh_train.txt.
+Resume from your last checkpoint (UT3M_1-22_boundary_refinement_final.pt).
+
+Fine-tuning the model on the top of the above model.
+### Results for each 16,000 steps
+1.  Accuracy 75.32% at 16,000 steps. 
+2.  Accuracy 80.14% at 32,000 steps. 
+
+** This training is not helping much. trying next strategy **
+
+## The Valley Fix
+The "Mixed Refresh" curriculum (30% truncated reversal sequences) caused a regression in accuracy from 88.8% to 80.1%. Analysis reveals a "Valley of Failures" in the 6-10 digit range (prompt lengths 18-29) which is currently under-represented in the training data. This plan pivots to a "Balanced Refinement" strategy.
+
+We will resume from the 88.8% checkpoint (UT3M_1-22_boundary_refinement_final.pt) rather than the current mixed-refresh model. This discards the regressed weights and builds directly on the model's best known state.
+
+** New Plan ** 
+1. **Update `get_uniform_length_number` logic** to target 1-12 digits when force_short is true (broadening the bias from 1-5).
+2. **Revert the main block** to generate 100% full math sequences (remove the mix_reversal_ratio logic).
+3. **Set `bias_short=0.6` (60%)** to heavily prioritize the "Valley" and short ranges.
+

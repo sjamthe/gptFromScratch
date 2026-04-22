@@ -6,7 +6,8 @@ import itertools
 
 class RPNDataset(Dataset):
     def __init__(self, num_samples=-1, max_operands=2, operations=('+', '-'), 
-                 max_number=100, file_path=None, tokenizer=None, max_seq_len=256):
+                 max_number=100, file_path=None, tokenizer=None, max_seq_len=256,
+                 bias_short=0.0):
         """
         Dataset class for RPN mathematical expressions.
         """
@@ -15,7 +16,7 @@ class RPNDataset(Dataset):
         if file_path:
             self._load_from_file(file_path)
         else:
-            self._generate_random_scratchpad_examples(num_samples, operations, max_number, tokenizer, max_seq_len)
+            self._generate_random_scratchpad_examples(num_samples, operations, max_number, tokenizer, max_seq_len, bias_short)
     
     def _load_from_file(self, file_path: str):
         """Load RPN expressions and answers from a file."""
@@ -48,8 +49,8 @@ class RPNDataset(Dataset):
         steps = []
         carry = 0
         
+        prefix = f"<{a_rev} {b_rev} {op}="
         if op == '+':
-            prefix = f"<({a_rev})({b_rev}){op}=:"
             derived_digits = []
             for i in range(max_len):
                 d_a = int(a_rev[i]) if i < len(a_rev) else 0
@@ -69,10 +70,10 @@ class RPNDataset(Dataset):
             ans_rev = str(ans)[::-1]
             ans_str = str(ans) 
             scratchpad_math = ":".join(steps)
-            return f"{prefix}{scratchpad_math}:{ans_rev}>{ans_str}"
+            full_res = f"{prefix}{scratchpad_math}:{ans_rev}>{ans_str}"
+            return (full_res, prefix)
             
         elif op == '-':
-            prefix = f"<({a_rev})({b_rev}){op}=:"
             derived_digits = []
             for i in range(max_len):
                 d_a = int(a_rev[i]) if i < len(a_rev) else 0
@@ -121,37 +122,43 @@ class RPNDataset(Dataset):
             
             ans = int(a_str) - int(b_str)
             ans_str = str(ans)
-            return f"{prefix}{final_scratchpad}>{ans_str}"
-        return ""
+            full_res = f"{prefix}{final_scratchpad}>{ans_str}"
+            return (full_res, prefix)
+        return ("", "")
 
-    def _generate_random_scratchpad_examples(self, num_samples: int, operations: Tuple[str, ...], max_number: int, tokenizer, max_seq_len):
-        def get_uniform_length_number(max_num):
-            num_digits = random.randint(1, len(str(max_num)))
+    def _generate_random_scratchpad_examples(self, num_samples: int, operations: Tuple[str, ...], max_number: int, tokenizer, max_seq_len, bias_short=0.0):
+        def get_uniform_length_number(max_num, force_short=False):
+            max_digits_possible = len(str(max_num))
+            if force_short:
+                num_digits = random.randint(1, min(12, max_digits_possible))
+            else:
+                num_digits = random.randint(1, max_digits_possible)
+                
             curr_max = min(max_num, (10 ** num_digits) - 1)
             curr_min = 0 if num_digits == 1 else (10 ** (num_digits - 1))
             return random.randint(curr_min, curr_max)
             
-        def rs0(): return " " * random.randint(0, 2)
+        def rs0(): return " " * random.randint(0, 5)
         def lpad0(): return "0" * random.randint(0, 2)
         
         while len(self.examples) < num_samples:
-            a = get_uniform_length_number(max_number)
-            b = get_uniform_length_number(max_number)
+            force_short = random.random() < bias_short
+            a = get_uniform_length_number(max_number, force_short)
+            b = get_uniform_length_number(max_number, force_short)
             op = random.choice(operations)
             if op == '/' and b == 0: continue
                 
             str_a = str(a)
             str_b = str(b)
             # Parenthesized prompt with NO spaces
-            prompt_str = f"({str_a})({str_b}){op}?"
-            result_str = self._generate_scratchpad(str_a, str_b, op)
-            full_line = f"{prompt_str}{result_str}"
-
+            prompt_str = f"{str_a} {rs0()}{str_b}{rs0()}{op}?"
+            full_res, rev_res = self._generate_scratchpad(str_a, str_b, op)
+            
             if tokenizer is not None:
-                tokens = tokenizer.encode(full_line)
+                tokens = tokenizer.encode(f"{prompt_str}{full_res}")
                 if len(tokens) > max_seq_len: continue
             
-            self.examples.append((prompt_str, result_str))
+            self.examples.append((prompt_str, full_res, rev_res))
             if len(self.examples) % 100000 == 0:
                 print(f"Generated {len(self.examples)}/{num_samples} samples...")
 
@@ -161,29 +168,36 @@ if __name__ == "__main__":
 
     max_number = (10 ** 22) - 1
     num_samples = 6_000_000
-    print(f"Initializing full {num_samples} mixed-scale dataset...")
+    
+    print(f"Initializing Balanced Refinement {num_samples} samples (bias_1-12_digits=0.6)...")
     dataset = RPNDataset(
         num_samples=num_samples,
         max_operands=2,
         operations=('+','-',),
         max_number=max_number,
         tokenizer=tokenizer,
-        max_seq_len=256
+        max_seq_len=256,
+        bias_short=0.6
     )
     
-    print("Generating Training Data (Mixed-Scale 1-22 digits)...")
-    file_path_prefix = "rpn_llm/data/RPNData-1-22_tens_comp_bracketed"
+    print("Generating Balanced Refinement Training Data (1-22 digits)...")
+    file_path_prefix = "rpn_llm/data/RPNData-1-22_balanced_refinement"
+    
     train_f = open(file_path_prefix + "_train.txt", 'w', encoding='utf-8')
     val_f = open(file_path_prefix + "_val.txt", 'w', encoding='utf-8')
     test_f = open(file_path_prefix + "_test.txt", 'w', encoding='utf-8')
-
+    
     train_pct, val_pct = 80, 10
-    for rpn_expr, answer in dataset.examples:
+    for prompt, full_res, rev_res in dataset.examples:
         rand_num = random.randint(0, 99)
-        line = f"{rpn_expr}{answer}\n"
-        if rand_num < train_pct: train_f.write(line)
-        elif rand_num < train_pct + val_pct: val_f.write(line)
-        else: test_f.write(line)
+        full_line = f"{prompt}{full_res}\n"
+        
+        if rand_num < train_pct:
+            train_f.write(full_line)
+        elif rand_num < train_pct + val_pct:
+            val_f.write(full_line)
+        else:
+            test_f.write(full_line)
 
     train_f.close(); val_f.close(); test_f.close()
-    print("Training data generation complete.")
+    print(f"Training data generation complete.")

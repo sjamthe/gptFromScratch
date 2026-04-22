@@ -186,9 +186,9 @@ def train_rpn_llm(start_step=0, checkpoint_path=None):
     print(f"Context length: {T}")
     print(f"Gradient accumulation steps: {grad_accum_steps}")
 
-    # Phase 9: Mixed-Scale Scratch Training (1-9 digits)
-    train_dataset = "rpn_llm/data/RPNData-1-22_tens_comp_bracketed_train.txt"
-    val_dataset = "rpn_llm/data/RPNData-1-22_tens_comp_bracketed_val.txt"
+    # Phase 12: Balanced Refinement (Addressing the 1-12 digit "Valley")
+    train_dataset = "rpn_llm/data/RPNData-1-22_balanced_refinement_train.txt"
+    val_dataset = "rpn_llm/data/RPNData-1-22_balanced_refinement_val.txt"
     train_loader = DataLoaderLite(B, T, train_dataset)
     val_loader = DataLoaderLite(B, T, val_dataset)
 
@@ -202,16 +202,18 @@ def train_rpn_llm(start_step=0, checkpoint_path=None):
     # Initialize natively tracking deeply scaled logic limits
     universal_mode = True
     prefix = "UT3M" if universal_mode else "rope25M"
-    run_name = f"{prefix}_1-22_tens_comp_bracketed"
+    run_name = f"{prefix}_1-22_balanced_refinement"
+
+
     model = GPT(GPTConfig(vocab_size=64, n_layer=n_layer, n_head=n_head, n_embd=n_embd, block_size=2048, universal=universal_mode))
     model.to(device)
     if device == 'cuda':
         model = torch.compile(model)
     print("Model Parameters: ", sum(p.numel() for p in model.parameters()) / 1e6, "M")
     
-    max_lr = 1e-4
+    max_lr = 5e-5
     min_lr = max_lr * 0.1
-    warmup_steps = 500
+    warmup_steps = 200
     max_steps = 62277
 
     def get_lr(it):
@@ -241,7 +243,8 @@ def train_rpn_llm(start_step=0, checkpoint_path=None):
             "n_layer": n_layer,
             "n_head": n_head,
             "n_embd": n_embd,
-            "model_params": sum(p.numel() for p in model.parameters()) / 1e6
+            "model_params": sum(p.numel() for p in model.parameters()) / 1e6,
+            "train_dataset": train_dataset,
         }
     )
 
@@ -322,7 +325,7 @@ def train_rpn_llm(start_step=0, checkpoint_path=None):
 if __name__ == "__main__":
     import sys
     start_step = 0
-    checkpoint_path = None
+    checkpoint_path = "rpn_llm/models/UT3M_1-22_boundary_refinement_final.pt"
     if len(sys.argv) > 2:
         start_step = int(sys.argv[1])
         checkpoint_path = sys.argv[2]
