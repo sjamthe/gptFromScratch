@@ -449,3 +449,29 @@ We will resume from the 88.8% checkpoint (UT3M_1-22_boundary_refinement_final.pt
 2. **Revert the main block** to generate 100% full math sequences (remove the mix_reversal_ratio logic).
 3. **Set `bias_short=0.6` (60%)** to heavily prioritize the "Valley" and short ranges.
 
+### Results : Accuract 74%
+
+Did worse than mixed dataset.
+<pre>
+Token Length | Total Items | Accuracy
+ 5 | 109        | 0.00%
+ 6 | 447        | 0.00%
+ 7 | 1002       | 1.95%
+ 8 | 2058       | 9.96%
+ 9 | 3469       | 19.53%
+10 | 5792       | 24.22%
+11 | 8187       | 36.91%
+12 | 11173      | 39.45%
+13 | 14608      | 48.05%
+14 | 18152      | 52.54%
+15 | 21740      | 59.18%
+16 | 25141      | 66.60%
+17 | 28554      | 66.99%
+18 | 31712      | 74.41%
+19 | 34339      | 80.47%
+20 | 36556      | 84.18%
+21 | 37434      | 84.77%
+22 | 37142      | 88.09%
+</pre>
+
+# Switching to RDT - Recurrent depth Tranaformer 

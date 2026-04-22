@@ -6,7 +6,7 @@ import torch
 import wandb
 
 import sys
-from model_rope import GPT, GPTConfig
+from model_rdt import GPT, GPTConfig
 from utils import RPNTokenizer, DataLoaderLite
 
 def run_teacher_forcing_validation(model, val_loader, device, step):
@@ -187,33 +187,34 @@ def train_rpn_llm(start_step=0, checkpoint_path=None):
     print(f"Gradient accumulation steps: {grad_accum_steps}")
 
     # Phase 12: Balanced Refinement (Addressing the 1-12 digit "Valley")
-    train_dataset = "rpn_llm/data/RPNData-1-22_balanced_refinement_train.txt"
-    val_dataset = "rpn_llm/data/RPNData-1-22_balanced_refinement_val.txt"
+    dataset_prefix = "1-22_balanced_refinement"
+    train_dataset = f"rpn_llm/data/RPNData-{dataset_prefix}_train.txt"
+    val_dataset = f"rpn_llm/data/RPNData-{dataset_prefix}_val.txt"
     train_loader = DataLoaderLite(B, T, train_dataset)
     val_loader = DataLoaderLite(B, T, val_dataset)
 
     torch.set_float32_matmul_precision('high')
     
-    # High-Capacity 35M Model params
-    n_layer = 8
+    # High-Capacity RDT Model params
+    n_prelude = 1
+    n_coda = 1
+    n_layer = 6 # Recurrent loops
     n_head = 8
     n_embd = 512
     
-    # Initialize natively tracking deeply scaled logic limits
-    universal_mode = True
-    prefix = "UT3M" if universal_mode else "rope25M"
-    run_name = f"{prefix}_1-22_balanced_refinement"
+    model_prefix = "RDT9M"
+    run_name = f"{model_prefix}_{dataset_prefix}"
 
 
-    model = GPT(GPTConfig(vocab_size=64, n_layer=n_layer, n_head=n_head, n_embd=n_embd, block_size=2048, universal=universal_mode))
+    model = GPT(GPTConfig(vocab_size=64, n_prelude=n_prelude, n_coda=n_coda, n_layer=n_layer, n_head=n_head, n_embd=n_embd, block_size=2048))
     model.to(device)
     if device == 'cuda':
         model = torch.compile(model)
     print("Model Parameters: ", sum(p.numel() for p in model.parameters()) / 1e6, "M")
     
-    max_lr = 5e-5
+    max_lr = 1e-4
     min_lr = max_lr * 0.1
-    warmup_steps = 200
+    warmup_steps = 1000
     max_steps = 62277
 
     def get_lr(it):
@@ -325,7 +326,7 @@ def train_rpn_llm(start_step=0, checkpoint_path=None):
 if __name__ == "__main__":
     import sys
     start_step = 0
-    checkpoint_path = "rpn_llm/models/UT3M_1-22_boundary_refinement_final.pt"
+    checkpoint_path = None # Start fresh for RDT since weights differ
     if len(sys.argv) > 2:
         start_step = int(sys.argv[1])
         checkpoint_path = sys.argv[2]

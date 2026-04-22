@@ -4,7 +4,7 @@ import torch
 import json
 import time
 from collections import defaultdict
-from model_rope import GPT, GPTConfig
+from model_rdt import GPT, GPTConfig
 from utils import RPNTokenizer, DataLoaderLite
 
 VALIDATION_SET_RATIO = 0.025
@@ -361,9 +361,9 @@ def validate_model(checkpoint_path, test_file_path, output_fail_path, num_passes
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(description="Validate RPN Transformer")
-    parser.add_argument("--model", type=str, default="rpn_llm/models/UT3M_1-22_mixed_refresh_32000.pt", help="Path to checkpoint")
+    parser.add_argument("--model", type=str, default="rpn_llm/models/RDT9M_1-22_balanced_refinement_32000.pt", help="Path to checkpoint")
     parser.add_argument("--test_file", type=str, default="rpn_llm/data/RPNData-1-22_balanced_refinement_test.txt", help="Path to test file")
-    parser.add_argument("--output_file", type=str, default="rpn_llm/results/UT3M_1-22_balanced_refinement_failures.txt", help="Path to output failure file")
+    parser.add_argument("--output_file", type=str, default="rpn_llm/results/RDT9M_1-22_balanced_refinement_32000_failures.txt", help="Path to output failure file")
     parser.add_argument("--num_passes", type=int, default=None, help="Force number of universal passes")
     parser.add_argument("--early_stop", type=int, default=None, help="Stop if logit is stable for N passes")
     
