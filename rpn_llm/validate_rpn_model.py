@@ -220,8 +220,8 @@ def validate_model(checkpoint_path, test_file_path, output_fail_path, arch=None,
                 prompt_str = prompt_strs[b]
                 
                 # New regex-based operand extraction for (n1)(n2)op? format
-                # Enhanced regex to capture spaces: num1 [s1] num2 [s2] op ?
-                m = re.search(r"(\d+)(\s+)(\d+)(\s*)([+\-])\?", prompt_str)
+                # Updated regex to handle both (n1) (n2)op? and n1 n2 op? formats with [BOS]
+                m = re.search(r"(?:\( *)?(\d+)(?: *\))?(\s*)(?:\( *)?(\d+)(?: *\))?(\s*)([+\-])\?", prompt_str)
                 
                 expected_ans_str = expected_str.split('>')[-1].split('[UNK]')[0].split('\n')[0].strip() if '>' in expected_str else ""
                 predicted_ans_str = predicted_str.split('>')[-1].split('[UNK]')[0].split('\n')[0].strip() if '>' in predicted_str else ""

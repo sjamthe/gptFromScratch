@@ -151,8 +151,8 @@ class RPNDataset(Dataset):
                 
             str_a = str(a)
             str_b = str(b)
-            # Parenthesized prompt with exact requested single spacing
-            prompt_str = f"{str_a} {str_b}{op}?"
+            # Compact bracketed prompt for maximum structural density
+            prompt_str = f"({str_a})({str_b}){op}?"
             full_res, rev_res = self._generate_scratchpad(str_a, str_b, op)
             
             if tokenizer is not None:
