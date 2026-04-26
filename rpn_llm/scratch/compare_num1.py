@@ -30,16 +30,14 @@ def parse_fail_file(fail_file):
     if total_evaluated == 0:
         return None
         
-    # Derive accuracy
-    num_possible_lengths = 22
-    total_per_length = total_evaluated / num_possible_lengths
-    
-    accuracies = {}
+    # Calculate % Share of Total Failures
+    total_failures = sum(fail_counts.values())
+    failure_shares = {}
     for l in range(1, 23):
         fails = fail_counts.get(l, 0)
-        acc = max(0, (total_per_length - fails) / total_per_length) * 100
-        accuracies[l] = acc
-    return accuracies
+        rate = (fails / total_failures) * 100 if total_failures > 0 else 0
+        failure_shares[l] = rate
+    return failure_shares
 
 def main():
     files = [
