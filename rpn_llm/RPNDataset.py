@@ -6,8 +6,7 @@ import itertools
 
 class RPNDataset(Dataset):
     def __init__(self, num_samples=-1, max_operands=2, operations=('+', '-'), 
-                 max_number=100, file_path=None, tokenizer=None, max_seq_len=256,
-                 bias_short=0.0):
+                 max_number=100, file_path=None, tokenizer=None, max_seq_len=256):
         """
         Dataset class for RPN mathematical expressions.
         """
@@ -16,7 +15,7 @@ class RPNDataset(Dataset):
         if file_path:
             self._load_from_file(file_path)
         else:
-            self._generate_random_scratchpad_examples(num_samples, operations, max_number, tokenizer, max_seq_len, bias_short)
+            self._generate_random_scratchpad_examples(num_samples, operations, max_number, tokenizer, max_seq_len)
     
     def _load_from_file(self, file_path: str):
         """Load RPN expressions and answers from a file."""
@@ -126,32 +125,34 @@ class RPNDataset(Dataset):
             return (full_res, prefix)
         return ("", "")
 
-    def _generate_random_scratchpad_examples(self, num_samples: int, operations: Tuple[str, ...], max_number: int, tokenizer, max_seq_len, bias_short=0.0):
-        def get_uniform_length_number(max_num, force_short=False):
+    def _generate_random_scratchpad_examples(self, num_samples: int, operations: Tuple[str, ...], max_number: int, tokenizer, max_seq_len):
+        def get_number(max_num, uniform=False):
             max_digits_possible = len(str(max_num))
-            if force_short:
-                num_digits = random.randint(1, min(12, max_digits_possible))
-            else:
+            if uniform:
                 num_digits = random.randint(1, max_digits_possible)
+            else:
+                tier = random.random()
+                if tier < 0.33:
+                    num_digits = random.randint(1, min(4, max_digits_possible))
+                elif tier < 0.66:
+                    num_digits = random.randint(min(5, max_digits_possible), min(12, max_digits_possible))
+                else:
+                    num_digits = random.randint(min(13, max_digits_possible), max_digits_possible)
                 
             curr_max = min(max_num, (10 ** num_digits) - 1)
             curr_min = 0 if num_digits == 1 else (10 ** (num_digits - 1))
             return random.randint(curr_min, curr_max)
-            
-        def rs0(): return " " * random.randint(0, 5)
-        def lpad0(): return "0" * random.randint(0, 2)
         
         while len(self.examples) < num_samples:
-            force_short = random.random() < bias_short
-            a = get_uniform_length_number(max_number, force_short)
-            b = get_uniform_length_number(max_number, force_short)
+            a = get_number(max_number, uniform=getattr(self, 'uniform', False))
+            b = get_number(max_number, uniform=getattr(self, 'uniform', False))
             op = random.choice(operations)
             if op == '/' and b == 0: continue
                 
             str_a = str(a)
             str_b = str(b)
-            # Parenthesized prompt with NO spaces
-            prompt_str = f"{str_a} {rs0()}{str_b}{rs0()}{op}?"
+            # Parenthesized prompt with exact requested single spacing
+            prompt_str = f"{str_a} {str_b}{op}?"
             full_res, rev_res = self._generate_scratchpad(str_a, str_b, op)
             
             if tokenizer is not None:
@@ -163,25 +164,32 @@ class RPNDataset(Dataset):
                 print(f"Generated {len(self.examples)}/{num_samples} samples...")
 
 if __name__ == "__main__":
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--samples", type=int, default=6000000)
+    parser.add_argument("--uniform", action="store_true", help="Use purely uniform length distribution (1-22)")
+    parser.add_argument("--name", type=str, default="rpn_llm/data/RPNData-1-22_tens_comp_clean_tiered")
+    args = parser.parse_args()
+
     from utils import RPNTokenizer
     tokenizer = RPNTokenizer("rpn_llm/rpn-tokenizer.json")
 
     max_number = (10 ** 22) - 1
-    num_samples = 6_000_000
+    num_samples = args.samples
     
-    print(f"Initializing Balanced Refinement {num_samples} samples (bias_1-12_digits=0.6)...")
+    print(f"Initializing RPNDataset {num_samples} samples...")
     dataset = RPNDataset(
         num_samples=num_samples,
         max_operands=2,
         operations=('+','-',),
         max_number=max_number,
         tokenizer=tokenizer,
-        max_seq_len=256,
-        bias_short=0.6
+        max_seq_len=256
     )
+    dataset.uniform = args.uniform
     
-    print("Generating Balanced Refinement Training Data (1-22 digits)...")
-    file_path_prefix = "rpn_llm/data/RPNData-1-22_balanced_refinement"
+    print(f"Generating {'Uniform' if args.uniform else 'Tiered'} Training Data...")
+    file_path_prefix = args.name
     
     train_f = open(file_path_prefix + "_train.txt", 'w', encoding='utf-8')
     val_f = open(file_path_prefix + "_val.txt", 'w', encoding='utf-8')
@@ -190,7 +198,8 @@ if __name__ == "__main__":
     train_pct, val_pct = 80, 10
     for prompt, full_res, rev_res in dataset.examples:
         rand_num = random.randint(0, 99)
-        full_line = f"{prompt}{full_res}\n"
+        # Prepend [BOS] token to provide a stable start-of-sequence signal
+        full_line = f"[BOS]{prompt}{full_res}\n"
         
         if rand_num < train_pct:
             train_f.write(full_line)

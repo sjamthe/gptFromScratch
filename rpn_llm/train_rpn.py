@@ -6,7 +6,6 @@ import torch
 import wandb
 
 import sys
-from model_rdt import GPT, GPTConfig
 from utils import RPNTokenizer, DataLoaderLite
 
 def run_teacher_forcing_validation(model, val_loader, device, step):
@@ -168,7 +167,7 @@ def run_generation_validation(model, val_loader, device, step, num_batches=4):
     model.train()
     return gen_accuracy_pct
 
-def train_rpn_llm(start_step=0, checkpoint_path=None):
+def train_rpn_llm(start_step=0, checkpoint_path=None, model_type="rdt", max_steps=80000, dataset_prefix="1-22_tens_comp_clean_tiered"):
     device = 'cuda' if torch.cuda.is_available() else 'mps' if torch.backends.mps.is_available() else 'cpu'
     print(f"Using device: {device}")
 
@@ -186,8 +185,8 @@ def train_rpn_llm(start_step=0, checkpoint_path=None):
     print(f"Context length: {T}")
     print(f"Gradient accumulation steps: {grad_accum_steps}")
 
-    # Phase 12: Balanced Refinement (Addressing the 1-12 digit "Valley")
-    dataset_prefix = "1-22_balanced_refinement"
+    # Select dataset
+    # dataset_prefix is passed as an argument
     train_dataset = f"rpn_llm/data/RPNData-{dataset_prefix}_train.txt"
     val_dataset = f"rpn_llm/data/RPNData-{dataset_prefix}_val.txt"
     train_loader = DataLoaderLite(B, T, train_dataset)
@@ -195,34 +194,42 @@ def train_rpn_llm(start_step=0, checkpoint_path=None):
 
     torch.set_float32_matmul_precision('high')
     
-    # High-Capacity RDT Model params
-    n_prelude = 1
-    n_coda = 1
-    n_layer = 6 # Recurrent loops
-    n_head = 8
-    n_embd = 512
-    
-    model_prefix = "RDT9M"
+    if model_type == "rdt":
+        from model_rdt import GPT, GPTConfig
+        n_prelude, n_coda, n_layer = 1, 1, 6
+        n_head, n_embd = 8, 512
+        model_prefix = "RDT9M"
+        config = GPTConfig(vocab_size=64, n_prelude=n_prelude, n_coda=n_coda, n_layer=n_layer, n_head=n_head, n_embd=n_embd, block_size=2048)
+    elif model_type == "ut":
+        from model_rope import GPT, GPTConfig
+        n_layer, n_head, n_embd = 8, 8, 512
+        model_prefix = "UT3M"
+        config = GPTConfig(vocab_size=64, n_layer=n_layer, n_head=n_head, n_embd=n_embd, block_size=2048, universal=True)
+    elif model_type == "rope":
+        from model_rope import GPT, GPTConfig
+        n_layer, n_head, n_embd = 8, 8, 512
+        model_prefix = "rope25M"
+        config = GPTConfig(vocab_size=64, n_layer=n_layer, n_head=n_head, n_embd=n_embd, block_size=2048, universal=False)
+
     run_name = f"{model_prefix}_{dataset_prefix}"
 
-
-    model = GPT(GPTConfig(vocab_size=64, n_prelude=n_prelude, n_coda=n_coda, n_layer=n_layer, n_head=n_head, n_embd=n_embd, block_size=2048))
+    model = GPT(config)
     model.to(device)
     if device == 'cuda':
         model = torch.compile(model)
-    print("Model Parameters: ", sum(p.numel() for p in model.parameters()) / 1e6, "M")
+    print(f"Initialized {model_type.upper()} Model Parameters: ", sum(p.numel() for p in model.parameters()) / 1e6, "M")
     
     max_lr = 1e-4
     min_lr = max_lr * 0.1
     warmup_steps = 1000
-    max_steps = 62277
-
+    lr_decay_steps = 62277
+    
     def get_lr(it):
         if it < warmup_steps:
             return max_lr * (it+1) / warmup_steps
-        if it > max_steps:
+        if it > lr_decay_steps:
             return min_lr
-        decay_ratio = (it - warmup_steps) / (max_steps - warmup_steps)
+        decay_ratio = (it - warmup_steps) / (lr_decay_steps - warmup_steps)
         assert 0 <= decay_ratio <= 1
         coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio))
         return min_lr + (max_lr - min_lr) * coeff
@@ -244,6 +251,7 @@ def train_rpn_llm(start_step=0, checkpoint_path=None):
             "n_layer": n_layer,
             "n_head": n_head,
             "n_embd": n_embd,
+            "model_type": model_type,
             "model_params": sum(p.numel() for p in model.parameters()) / 1e6,
             "train_dataset": train_dataset,
         }
@@ -320,14 +328,20 @@ def train_rpn_llm(start_step=0, checkpoint_path=None):
             print(f"Model checkpoint saved to rpn_llm/models/{run_name}_{step+1}.pt")
    
     wandb.finish()
-    torch.save(checkpoint, f'rpn_llm/models/{run_name}_final.pt')
-    print(f"Model checkpoint saved to rpn_llm/models/{run_name}_final.pt")
+    if (step+1) % 16000 != 0:
+        torch.save(checkpoint, f'rpn_llm/models/{run_name}_{step+1}.pt')
+        print(f"Model checkpoint saved to rpn_llm/models/{run_name}_{step+1}.pt")
 
 if __name__ == "__main__":
-    import sys
-    start_step = 0
-    checkpoint_path = None # Start fresh for RDT since weights differ
-    if len(sys.argv) > 2:
-        start_step = int(sys.argv[1])
-        checkpoint_path = sys.argv[2]
-    train_rpn_llm(start_step, checkpoint_path)
+    import argparse
+    parser = argparse.ArgumentParser()
+    # Positional args
+    parser.add_argument("start_step", type=int, nargs="?", default=0, help="Step to resume from")
+    parser.add_argument("checkpoint_path", type=str, nargs="?", default=None, help="Path to checkpoint")
+    parser.add_argument("--model", type=str, default="rdt", choices=["rope", "ut", "rdt"], help="Model architecture to train")
+    parser.add_argument("--max_steps", type=int, default=80000, help="Total steps to train for (default 80000)")
+    parser.add_argument("--dataset", type=str, default="1-22_tens_comp_clean_tiered", help="Dataset prefix")
+    
+    args = parser.parse_args()
+        
+    train_rpn_llm(args.start_step, args.checkpoint_path, args.model, args.max_steps, args.dataset)

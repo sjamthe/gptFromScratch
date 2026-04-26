@@ -4,7 +4,6 @@ import torch
 import json
 import time
 from collections import defaultdict
-from model_rdt import GPT, GPTConfig
 from utils import RPNTokenizer, DataLoaderLite
 
 VALIDATION_SET_RATIO = 0.025
@@ -39,7 +38,7 @@ def calculate_carries(a_str, b_str, op):
                 carry_val = 0
     return carries
 
-def validate_model(checkpoint_path, test_file_path, output_fail_path, num_passes=None, early_stop=None):
+def validate_model(checkpoint_path, test_file_path, output_fail_path, arch=None, num_passes=None, early_stop=None):
     device = 'cuda' if torch.cuda.is_available() else 'mps' if torch.backends.mps.is_available() else 'cpu'
     print(f"Using device: {device}")
 
@@ -47,6 +46,17 @@ def validate_model(checkpoint_path, test_file_path, output_fail_path, num_passes
     print(f"Loading checkpoint {checkpoint_path}...")
     checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
     config = checkpoint['config']
+    
+    # Auto-detect architecture from config to prevent mismatches
+    if hasattr(config, 'n_prelude'):
+        detected_arch = "rdt"
+        from model_rdt import GPT
+    else:
+        detected_arch = "ut" if getattr(config, 'universal', False) else "rope"
+        from model_rope import GPT
+        
+    print(f"Detected Architecture: {detected_arch.upper()}")
+        
     model = GPT(config)
     model.load_state_dict(checkpoint['model'])
     model.to(device)
@@ -57,7 +67,13 @@ def validate_model(checkpoint_path, test_file_path, output_fail_path, num_passes
     # 2. Parse Test File
     print(f"Parsing test file {test_file_path}...")
     with open(test_file_path, "r", encoding="utf-8") as f:
-        lines = f.readlines()
+        raw_lines = f.readlines()
+        
+    lines = []
+    for line in raw_lines:
+        clean_line = re.sub(r'\s+', ' ', line.strip()) + '\n'
+        lines.append(clean_line)
+    del raw_lines
         
     # 3. Group by prompt token length to avoid padding issues
     # A prompt is everything up to and including the '=' sign and the trailing space. 
@@ -110,10 +126,16 @@ def validate_model(checkpoint_path, test_file_path, output_fail_path, num_passes
         'other': 0
     }
     reversal_fail_by_spaces = defaultdict(int) # Key: (s1_len, s2_len)
+    reversal_pos_failures = {'num1': 0, 'num2': 0, 'both': 0}
+    reversal_digit_failures = defaultdict(int) # Key: num_digits
 
     total_items = sum(len(items) for items in length_groups.values())
     start_time = time.time()
     overall_tokens_gen = 0
+    total_tokens_count = 0
+    total_tokens_correct = 0
+    fail_tokens_count = 0
+    fail_tokens_correct = 0
 
     # Ensure output file is freshly clean before append looping!
     with open(output_fail_path, "w", encoding="utf-8") as f:
@@ -204,6 +226,22 @@ def validate_model(checkpoint_path, test_file_path, output_fail_path, num_passes
                 expected_ans_str = expected_str.split('>')[-1].split('[UNK]')[0].split('\n')[0].strip() if '>' in expected_str else ""
                 predicted_ans_str = predicted_str.split('>')[-1].split('[UNK]')[0].split('\n')[0].strip() if '>' in predicted_str else ""
                 
+                # Token-level Accuracy Calculation
+                expected_tokens = tokenizer.encode(expected_str)
+                # Ensure gen_answer_tokens and expected_tokens are comparable lengths
+                match_count = 0
+                for t_idx in range(min(len(gen_answer_tokens), len(expected_tokens))):
+                    if gen_answer_tokens[t_idx] == expected_tokens[t_idx]:
+                        match_count += 1
+                
+                total_tokens_count += len(expected_tokens)
+                total_tokens_correct += match_count
+                
+                is_correct = (expected_ans_str == predicted_ans_str)
+                if not is_correct:
+                    fail_tokens_count += len(expected_tokens)
+                    fail_tokens_correct += match_count
+
                 carries = 0
                 is_zero = False
                 if m:
@@ -251,6 +289,32 @@ def validate_model(checkpoint_path, test_file_path, output_fail_path, num_passes
                     elif pred_pre != exp_pre:
                         failure_categories['reversal_failed'] += 1
                         reversal_fail_by_spaces[space_key] += 1
+                        
+                        # Analyze WHICH number failed in the reversal
+                        # Prefix format: <a_rev b_rev op=
+                        try:
+                            exp_parts = exp_pre.replace('<', '').split()
+                            pred_parts = pred_pre.replace('<', '').split()
+                            
+                            if len(exp_parts) >= 2 and len(pred_parts) >= 2:
+                                exp_n1_rev, exp_n2_rev = exp_parts[0], exp_parts[1]
+                                pred_n1_rev, pred_n2_rev = pred_parts[0], pred_parts[1]
+                                
+                                n1_fail = exp_n1_rev != pred_n1_rev
+                                n2_fail = exp_n2_rev != pred_n2_rev
+                                
+                                if n1_fail and n2_fail:
+                                    reversal_pos_failures['both'] += 1
+                                    reversal_digit_failures[len(exp_n1_rev)] += 1
+                                    reversal_digit_failures[len(exp_n2_rev)] += 1
+                                elif n1_fail:
+                                    reversal_pos_failures['num1'] += 1
+                                    reversal_digit_failures[len(exp_n1_rev)] += 1
+                                elif n2_fail:
+                                    reversal_pos_failures['num2'] += 1
+                                    reversal_digit_failures[len(exp_n2_rev)] += 1
+                        except:
+                            pass
                     elif pred_math != exp_math:
                         failure_categories['math_failed'] += 1
                     elif expected_ans_str != predicted_ans_str:
@@ -276,18 +340,27 @@ def validate_model(checkpoint_path, test_file_path, output_fail_path, num_passes
             accuracy = (total_correct / total_processed) * 100
             group_accuracy = (group_total_correct / group_total_processed) * 100
             accuracy_by_length[length] = group_accuracy
-            print(f"Progress: {total_processed}/{total_items} ({pct_complete:.2f}%) | Accuracy: {accuracy:.2f}% | Group {group_idx-1} Accuracy: {group_accuracy:.2f}% | Batch inference time: {batch_time:.2f}s | Tokens/sec: {tokens_per_sec:.1f}")
+            
+            running_token_acc = (total_tokens_correct / total_tokens_count) * 100 if total_tokens_count > 0 else 0
+            fail_token_acc = (fail_tokens_correct / fail_tokens_count) * 100 if fail_tokens_count > 0 else 0
+            
+            print(f"Progress: {total_processed}/{total_items} ({pct_complete:.2f}%) | Acc: {accuracy:.2f}% | Token Acc: {running_token_acc:.2f}% | Fail Token Acc: {fail_token_acc:.2f}% | Group {group_idx-1} Acc: {group_accuracy:.2f}% | Tokens/sec: {tokens_per_sec:.1f}")
             for cat, count in failure_categories.items():
                 print(f"{cat:<20}: {count}")
 
     # 5. Output Results
     accuracy = (total_correct / total_processed) * 100
+    final_token_acc = (total_tokens_correct / total_tokens_count) * 100 if total_tokens_count > 0 else 0
+    final_fail_token_acc = (fail_tokens_correct / fail_tokens_count) * 100 if fail_tokens_count > 0 else 0
+
     print(f"\n=====================")
     print(f"Validation Complete!")
     print(f"Total Evaluated: {total_processed}")
     print(f"Total Correct: {total_correct}")
     print(f"Total Failures: {len(failures)}")
     print(f"Accuracy: {accuracy:.2f}%")
+    print(f"Global Token Accuracy: {final_token_acc:.2f}%")
+    print(f"Failure Token Accuracy: {final_fail_token_acc:.2f}%")
     
     with open(output_fail_path, "a", encoding="utf-8") as f:
         f.write(f"\nValidation Accuracy: {accuracy:.2f}% ({total_correct}/{total_processed})\n")
@@ -345,6 +418,19 @@ def validate_model(checkpoint_path, test_file_path, output_fail_path, num_passes
             pct = (count / total_rev_fails * 100) if total_rev_fails > 0 else 0
             print(f"Spaces {spaces}: {count} failures ({pct:.1f}%)")
 
+        print("\n--- Reversal Failure Analysis (Position & Length) ---")
+        total_pos_fails = sum(reversal_pos_failures.values())
+        for pos, count in reversal_pos_failures.items():
+            pct = (count / total_pos_fails * 100) if total_pos_fails > 0 else 0
+            print(f"Failed on {pos:<8}: {count} ({pct:.1f}%)")
+            
+        print("\nReversal Failures by Digit Length:")
+        total_digit_fails = sum(reversal_digit_failures.values())
+        for length in sorted(reversal_digit_failures.keys()):
+            count = reversal_digit_failures[length]
+            pct = (count / total_digit_fails * 100) if total_digit_fails > 0 else 0
+            print(f"{length:2d} digits: {count} failures ({pct:.1f}%)")
+
     with open(output_fail_path, "a", encoding="utf-8") as f:
         f.write("\n--- Failure Category Breakdown ---\n")
         for cat, count in failure_categories.items():
@@ -358,15 +444,34 @@ def validate_model(checkpoint_path, test_file_path, output_fail_path, num_passes
                 pct = (count / total_rev_fails * 100) if total_rev_fails > 0 else 0
                 f.write(f"Spaces {spaces}: {count} failures ({pct:.1f}%)\n")
 
+            f.write("\n--- Reversal Failure Analysis (Position & Length) ---\n")
+            total_pos_fails = sum(reversal_pos_failures.values())
+            for pos, count in reversal_pos_failures.items():
+                pct = (count / total_pos_fails * 100) if total_pos_fails > 0 else 0
+                f.write(f"Failed on {pos:<8}: {count} ({pct:.1f}%)\n")
+                
+            f.write("\nReversal Failures by Digit Length:\n")
+            total_digit_fails = sum(reversal_digit_failures.values())
+            for length in sorted(reversal_digit_failures.keys()):
+                count = reversal_digit_failures[length]
+                pct = (count / total_digit_fails * 100) if total_digit_fails > 0 else 0
+                f.write(f"{length:2d} digits: {count} failures ({pct:.1f}%)\n")
+
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(description="Validate RPN Transformer")
-    parser.add_argument("--model", type=str, default="rpn_llm/models/RDT9M_1-22_balanced_refinement_32000.pt", help="Path to checkpoint")
-    parser.add_argument("--test_file", type=str, default="rpn_llm/data/RPNData-1-22_balanced_refinement_test.txt", help="Path to test file")
-    parser.add_argument("--output_file", type=str, default="rpn_llm/results/RDT9M_1-22_balanced_refinement_32000_failures.txt", help="Path to output failure file")
+    parser.add_argument("--model", type=str, default="rpn_llm/models/rope25M_1-22_tens_comp_clean_tiered_32000.pt", help="Path to checkpoint")
+    parser.add_argument("--test_file", type=str, default="rpn_llm/data/RPNData-1-22_tens_comp_clean_tiered_test.txt", help="Path to test file")
+    parser.add_argument("--output_file", type=str, default=None, help="Path to output failure file (auto-generated if not provided)")
+    parser.add_argument("--arch", type=str, default="rope", choices=["rope", "ut", "rdt"], help="Architecture of the checkpoint (rope, ut, rdt)")
     parser.add_argument("--num_passes", type=int, default=None, help="Force number of universal passes")
     parser.add_argument("--early_stop", type=int, default=None, help="Stop if logit is stable for N passes")
     
     args = parser.parse_args()
+    
+    if args.output_file is None:
+        model_basename = os.path.basename(args.model)
+        model_name = model_basename.replace(".pt", "")
+        args.output_file = f"rpn_llm/results/{model_name}_failures.txt"
 
-    validate_model(args.model, args.test_file, args.output_file, num_passes=args.num_passes, early_stop=args.early_stop)
+    validate_model(args.model, args.test_file, args.output_file, arch=args.arch, num_passes=args.num_passes, early_stop=args.early_stop)

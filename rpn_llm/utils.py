@@ -83,7 +83,9 @@ class DataLoaderLite:
         
         print("Tokenizing and building mask...")
         for line in lines:
-            line_tokens = self.tokenizer.encode(line)
+            # Clean spaces: strip leading/trailing and compress multiple spaces to one
+            clean_line = re.sub(r'\s+', ' ', line.strip()) + '\n'
+            line_tokens = self.tokenizer.encode(clean_line)
             is_answer = False
             line_mask = []
             for t in line_tokens:

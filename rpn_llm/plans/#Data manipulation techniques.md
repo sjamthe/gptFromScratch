@@ -449,7 +449,7 @@ We will resume from the 88.8% checkpoint (UT3M_1-22_boundary_refinement_final.pt
 2. **Revert the main block** to generate 100% full math sequences (remove the mix_reversal_ratio logic).
 3. **Set `bias_short=0.6` (60%)** to heavily prioritize the "Valley" and short ranges.
 
-### Results : Accuract 74%
+### Results : Accuracy 74%
 
 Did worse than mixed dataset.
 <pre>
@@ -475,3 +475,17 @@ Token Length | Total Items | Accuracy
 </pre>
 
 # Switching to RDT - Recurrent depth Tranaformer 
+RDT model with 
+   - block_size: int = 2048 # max sequence length
+   - vocab_size: int = 50 # number of tokens
+   - n_prelude: int = 1 # number of prelude blocks
+   - n_layer: int = 6 # number of recurrent passes (loop iterations)
+   - n_coda: int = 1 # number of coda blocks
+   - n_head: int = 8 # number of attention heads
+   - n_embd: int = 512 # embedding dimension
+
+Dataset: RPNData-1-22_balanced_refinement (same as above)
+
+### Results : Accuract 70.72%
+
+# End of data manipulation techniques. switching to removing consecutives spaces and comparing models
