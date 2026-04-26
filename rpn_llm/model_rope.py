@@ -54,7 +54,7 @@ class CausalSelfAttention(nn.Module):
         self.n_embd = config.n_embd
         # No absolute bias mask initialization needed for flash attention
     
-    def forward(self, x: torch.Tensor, freqs_cis: torch.Tensor, use_cache: bool = False, cache_state: tuple = None, return_attention: bool = False) -> tuple:
+    def forward(self, x: torch.Tensor, freqs_cis: torch.Tensor, use_cache: bool = False, cache_state: tuple = None, return_attention: bool = False, attn_mask: torch.Tensor = None) -> tuple:
         B, T, C = x.size()
         qkv = self.c_attn(x)
         q,k,v = qkv.split(self.n_embd, dim=2)
@@ -103,12 +103,19 @@ class CausalSelfAttention(nn.Module):
                 q_idx = torch.arange(offset, offset + T, device=x.device).view(-1, 1)
                 k_idx = torch.arange(k.size(2), device=x.device).view(1, -1)
                 mask = q_idx < k_idx
+                if attn_mask is not None:
+                    # attn_mask is (B, 1, T, T_total)
+                    mask = mask | ~attn_mask.squeeze(1) 
                 att = att.masked_fill(mask, float('-inf'))
             
             attn_weights = F.softmax(att, dim=-1)
             y = attn_weights @ v
         else:
-            y = F.scaled_dot_product_attention(q, k, v, is_causal=is_causal)
+            # If we have a custom mask, we must handle causality within it
+            if attn_mask is not None:
+                y = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask, is_causal=False)
+            else:
+                y = F.scaled_dot_product_attention(q, k, v, is_causal=is_causal)
 
         y = y.transpose(1, 2).contiguous().view(B, T, C)
         y = self.c_proj(y)
@@ -135,8 +142,8 @@ class Block(nn.Module):
         self.ln_2 = nn.LayerNorm(config.n_embd)
         self.mlp = MLP(config)
     
-    def forward(self, x: torch.Tensor, freqs_cis: torch.Tensor, use_cache: bool = False, cache_state: tuple = None, return_attention: bool = False) -> tuple:
-        attn_out, cache_out, weights = self.attn(self.ln_1(x), freqs_cis, use_cache=use_cache, cache_state=cache_state, return_attention=return_attention)
+    def forward(self, x: torch.Tensor, freqs_cis: torch.Tensor, use_cache: bool = False, cache_state: tuple = None, return_attention: bool = False, attn_mask: torch.Tensor = None) -> tuple:
+        attn_out, cache_out, weights = self.attn(self.ln_1(x), freqs_cis, use_cache=use_cache, cache_state=cache_state, return_attention=return_attention, attn_mask=attn_mask)
         x = x + attn_out
         x = x + self.mlp(self.ln_2(x))
         return x, cache_out, weights
@@ -184,6 +191,22 @@ class GPT(nn.Module):
         
     def forward(self, idx: torch.Tensor, targets: torch.Tensor = None, use_cache: bool = False, past_key_values: list = None, return_attention: bool = False, num_passes: int = None, halt_threshold: float = None, halt_on_logit_stability: int = None) -> tuple:
         B, T = idx.size()
+        
+        # Document Masking: Create a mask that prevents attention from crossing [BOS] (ID 2)
+        # Only relevant during training (T > 1)
+        attn_mask = None
+        if T > 1:
+            # seq_ids tracks which "problem" each token belongs to in the stream
+            # [BOS] tokens (id 2) increment the sequence counter
+            is_bos = (idx == 2)
+            seq_ids = is_bos.cumsum(dim=-1) # (B, T)
+            # doc_mask is True only for tokens in the same problem
+            doc_mask = (seq_ids.unsqueeze(1) == seq_ids.unsqueeze(2)) # (B, T, T)
+            # causal_mask is standard lower triangular
+            causal_mask = torch.tril(torch.ones(T, T, device=idx.device, dtype=torch.bool))
+            # Combine them
+            full_mask = doc_mask & causal_mask # (B, T, T)
+            attn_mask = full_mask.unsqueeze(1) # (B, 1, T, T) for head broadcasting
 
         x = self.transformer.wte(idx)
         
@@ -210,7 +233,7 @@ class GPT(nn.Module):
                 # Each pass in the universal loop gets its own KV cache entry
                 cache_idx = i
                 cache_in = past_key_values[cache_idx] if (past_key_values is not None and cache_idx < len(past_key_values)) else None
-                x, cache_out, weights = self.transformer.h(x, freqs_cis, use_cache=use_cache, cache_state=cache_in, return_attention=return_attention)
+                x, cache_out, weights = self.transformer.h(x, freqs_cis, use_cache=use_cache, cache_state=cache_in, return_attention=return_attention, attn_mask=attn_mask)
                 
                 if use_cache:
                     present_key_values.append(cache_out)
@@ -259,7 +282,7 @@ class GPT(nn.Module):
             # Standard model: num_passes/halt_threshold is ignored
             for i, block in enumerate(self.transformer.h):
                 cache_in = past_key_values[i] if past_key_values is not None else None
-                x, cache_out, weights = block(x, freqs_cis, use_cache=use_cache, cache_state=cache_in, return_attention=return_attention)
+                x, cache_out, weights = block(x, freqs_cis, use_cache=use_cache, cache_state=cache_in, return_attention=return_attention, attn_mask=attn_mask)
                 if use_cache:
                     present_key_values.append(cache_out)
                 if return_attention:
