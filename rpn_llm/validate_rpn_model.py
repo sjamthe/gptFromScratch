@@ -122,11 +122,10 @@ def validate_model(checkpoint_path, test_file_path, output_fail_path, arch=None,
         'reversal_skipped': 0,
         'reversal_failed': 0,
         'math_failed': 0,
-        'final_ans_failed': 0,
-        'other': 0
+        'only_final_ans_failed': 0
     }
     reversal_fail_by_spaces = defaultdict(int) # Key: (s1_len, s2_len)
-    reversal_pos_failures = {'num1': 0, 'num2': 0, 'both': 0}
+    reversal_pos_failures = {'num1': 0, 'num2': 0, 'both': 0, 'malformed': 0}
     reversal_digit_failures = defaultdict(int) # Key: num_digits
 
     total_items = sum(len(items) for items in length_groups.values())
@@ -158,12 +157,19 @@ def validate_model(checkpoint_path, test_file_path, output_fail_path, arch=None,
             
             batch_prompt_tokens = []
             expected_strs = []
+            expected_tokens_list = []
             prompt_strs = []
             
             for line_str in batch_items:
                 line_tokens = tokenizer.encode(line_str)
-                sep_idx = line_tokens.index(eq_id)
+                try:
+                    sep_idx = line_tokens.index(eq_id)
+                except ValueError:
+                    # Fallback if '?' is missing for some reason
+                    sep_idx = len(line_tokens) - 1
+                    
                 prompt_tokens = line_tokens[:sep_idx + 1]
+                expected_tokens_list.append(line_tokens[sep_idx + 1:])
                 
                 batch_prompt_tokens.append(prompt_tokens)
                 prompt_strs.append(tokenizer.decode(prompt_tokens).strip())
@@ -206,8 +212,13 @@ def validate_model(checkpoint_path, test_file_path, output_fail_path, arch=None,
                             
             # Extract and verify the generated characters
             for b in range(B):
+                # Find the separator token index in the prompt (up to the original prompt length)
+                # This ensures we align perfectly with the first generated token
+                current_prompt_tokens = batch_prompt_tokens[b]
+                prompt_len = len(current_prompt_tokens)
+                
                 full_generated_tokens = idx[b].tolist()
-                gen_answer_tokens = full_generated_tokens[length:]
+                gen_answer_tokens = full_generated_tokens[prompt_len:]
                 
                 # Truncate string sequence heavily at newline (to match exactly)
                 if nl_id in gen_answer_tokens:
@@ -226,9 +237,13 @@ def validate_model(checkpoint_path, test_file_path, output_fail_path, arch=None,
                 expected_ans_str = expected_str.split('>')[-1].split('[UNK]')[0].split('\n')[0].strip() if '>' in expected_str else ""
                 predicted_ans_str = predicted_str.split('>')[-1].split('[UNK]')[0].split('\n')[0].strip() if '>' in predicted_str else ""
                 
-                # Token-level Accuracy Calculation
-                expected_tokens = tokenizer.encode(expected_str)
-                # Ensure gen_answer_tokens and expected_tokens are comparable lengths
+                # Use the pre-sliced tokens from the original line to avoid re-encoding shifts
+                expected_tokens = expected_tokens_list[b]
+                
+                # Truncate expected_tokens at newline to match the generation limit
+                if nl_id in expected_tokens:
+                    expected_tokens = expected_tokens[:expected_tokens.index(nl_id)+1]
+
                 match_count = 0
                 for t_idx in range(min(len(gen_answer_tokens), len(expected_tokens))):
                     if gen_answer_tokens[t_idx] == expected_tokens[t_idx]:
@@ -284,25 +299,29 @@ def validate_model(checkpoint_path, test_file_path, output_fail_path, arch=None,
                     s2 = m.group(4) if m else ""
                     space_key = (len(s1), len(s2))
 
-                    if not pred_pre or ('+=' not in predicted_str and '-=' not in predicted_str):
+                    is_reversal_skip = not pred_pre or ('+=' not in predicted_str and '-=' not in predicted_str)
+                    is_reversal_fail = not is_reversal_skip and pred_pre != exp_pre
+                    is_math_fail = pred_math != exp_math
+                    
+                    matched = False
+                    if is_reversal_skip:
                         failure_categories['reversal_skipped'] += 1
-                    elif pred_pre != exp_pre:
+                        matched = True
+                    
+                    if is_reversal_fail:
                         failure_categories['reversal_failed'] += 1
+                        matched = True
                         reversal_fail_by_spaces[space_key] += 1
                         
                         # Analyze WHICH number failed in the reversal
-                        # Prefix format: <a_rev b_rev op=
                         try:
                             exp_parts = exp_pre.replace('<', '').split()
                             pred_parts = pred_pre.replace('<', '').split()
-                            
                             if len(exp_parts) >= 2 and len(pred_parts) >= 2:
                                 exp_n1_rev, exp_n2_rev = exp_parts[0], exp_parts[1]
                                 pred_n1_rev, pred_n2_rev = pred_parts[0], pred_parts[1]
-                                
                                 n1_fail = exp_n1_rev != pred_n1_rev
                                 n2_fail = exp_n2_rev != pred_n2_rev
-                                
                                 if n1_fail and n2_fail:
                                     reversal_pos_failures['both'] += 1
                                     reversal_digit_failures[len(exp_n1_rev)] += 1
@@ -313,14 +332,19 @@ def validate_model(checkpoint_path, test_file_path, output_fail_path, arch=None,
                                 elif n2_fail:
                                     reversal_pos_failures['num2'] += 1
                                     reversal_digit_failures[len(exp_n2_rev)] += 1
-                        except:
-                            pass
-                    elif pred_math != exp_math:
+                                else:
+                                    reversal_pos_failures['malformed'] += 1
+                            else:
+                                reversal_pos_failures['malformed'] += 1
+                        except: 
+                            reversal_pos_failures['malformed'] += 1
+                    
+                    if is_math_fail:
                         failure_categories['math_failed'] += 1
-                    elif expected_ans_str != predicted_ans_str:
-                        failure_categories['final_ans_failed'] += 1
-                    else:
-                        failure_categories['other'] += 1
+                        matched = True
+                    
+                    if not matched:
+                        failure_categories['only_final_ans_failed'] += 1
 
                     # Document failure
                     fail_str = f"Q: {prompt_str} | Expected: {expected_ans_str} | Predicted: {predicted_ans_str} | Full Expected: {expected_str} | Full Pred: {predicted_str}"

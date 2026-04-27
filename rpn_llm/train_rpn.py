@@ -13,6 +13,8 @@ def run_teacher_forcing_validation(model, val_loader, device, step):
     gt_id  = tokenizer.encode(">")[0]
     unk_id = tokenizer.encode("[UNK]")[0]
     nl_id = tokenizer.encode("\n")[0]
+    pad_id = tokenizer.encode("[PAD]")[0]
+    bos_id = tokenizer.encode("[BOS]")[0]
     pad_id = 0 # [PAD] is 0
 
     model.eval()
@@ -31,16 +33,20 @@ def run_teacher_forcing_validation(model, val_loader, device, step):
         for _ in range(val_loss_steps):
             x_val, y_val = val_loader.next_batch()
             x_val, y_val = x_val.to(device), y_val.to(device)
+            # Mask out BOS (2) only. NL (1) MUST be learned so the model knows when to stop.
+            y_val_masked = y_val.clone()
+            y_val_masked[y_val_masked == 2] = -100
+            
             with torch.autocast(device, dtype=torch.bfloat16):
-                logits, loss_val = model(x_val, y_val)
+                logits, loss_val = model(x_val, y_val_masked)
             val_loss_accum += loss_val.item()
             
             # Calculate accuracies
             preds = torch.argmax(logits, dim=-1)
             
             # 1. Global Token-Level Accuracy
-            # Mask out non-content tokens (UNK, NL, PAD) and non-target tokens (-100)
-            valid_mask = (y_val != unk_id) & (y_val != nl_id) & (y_val != pad_id) & (y_val != -100)
+            # Mask out non-content tokens (UNK, NL, PAD, BOS) and non-target tokens (-100)
+            valid_mask = (y_val != unk_id) & (y_val != nl_id) & (y_val != pad_id) & (y_val != bos_id) & (y_val != -100)
             val_token_correct_accum += ((preds == y_val) & valid_mask).sum().item()
             val_token_target_accum += valid_mask.sum().item()
 
@@ -177,7 +183,7 @@ def train_rpn_llm(start_step=0, checkpoint_path=None, model_type="rdt", max_step
     
     total_batch_size = 8192
     B = 4
-    T = 256  # 256 deeply tracks cross-5-digit logic formats flawlessly!
+    T = 512  # Increased to 512 to capture the full context (including \n) for 17-22 digit problems
     assert total_batch_size % (B * T) == 0, "total_batch_size must be divisible by (B * T)"
     grad_accum_steps = total_batch_size // (B * T)
     print(f"Total batch size: {total_batch_size}")
@@ -198,26 +204,31 @@ def train_rpn_llm(start_step=0, checkpoint_path=None, model_type="rdt", max_step
         from model_rdt import GPT, GPTConfig
         n_prelude, n_coda, n_layer = 1, 1, 6
         n_head, n_embd = 8, 512
-        model_prefix = "RDT9M"
         config = GPTConfig(vocab_size=64, n_prelude=n_prelude, n_coda=n_coda, n_layer=n_layer, n_head=n_head, n_embd=n_embd, block_size=2048)
     elif model_type == "ut":
         from model_rope import GPT, GPTConfig
         n_layer, n_head, n_embd = 8, 8, 512
-        model_prefix = "UT3M"
         config = GPTConfig(vocab_size=64, n_layer=n_layer, n_head=n_head, n_embd=n_embd, block_size=2048, universal=True)
     elif model_type == "rope":
         from model_rope import GPT, GPTConfig
-        n_layer, n_head, n_embd = 8, 8, 512
-        model_prefix = "rope25M"
-        config = GPTConfig(vocab_size=64, n_layer=n_layer, n_head=n_head, n_embd=n_embd, block_size=2048, universal=False)
-
-    run_name = f"{model_prefix}_{dataset_prefix}"
+        # Stage: Scaling down to find the minimal model
+        n_layer, n_head, n_embd = 2, 4, 256
+        config = GPTConfig(vocab_size=64, n_layer=n_layer, n_head=n_head, n_embd=n_embd, block_size=512, universal=False)
 
     model = GPT(config)
     model.to(device)
+    
+    # Calculate parameter count dynamically
+    num_params = sum(p.numel() for p in model.parameters())
+    param_str = f"{num_params/1e6:.1f}M"
+    model_prefix = f"{model_type}{param_str}"
+    
+    run_name = f"{model_prefix}_{dataset_prefix}"
+
     if device == 'cuda':
         model = torch.compile(model)
-    print(f"Initialized {model_type.upper()} Model Parameters: ", sum(p.numel() for p in model.parameters()) / 1e6, "M")
+    print(f"Initialized {model_type.upper()} Model: {model_prefix}")
+    print(f"Total Parameters: {num_params:,}")
     
     max_lr = 1e-4
     min_lr = max_lr * 0.1
@@ -276,7 +287,11 @@ def train_rpn_llm(start_step=0, checkpoint_path=None, model_type="rdt", max_step
             x, y = train_loader.next_batch()
             x, y = x.to(device), y.to(device)
             with torch.autocast(device, dtype=torch.bfloat16):
-                logits, loss = model(x, y)
+                # Mask out BOS (2) only. NL (1) MUST be learned.
+                # This prevents the model from being penalized for unpredictable sequence transitions
+                y_masked = y.clone()
+                y_masked[y_masked == 2] = -100
+                logits, loss = model(x, y_masked)
             loss = loss / grad_accum_steps
             loss_accum += loss.detach()
             loss.backward()
@@ -316,7 +331,7 @@ def train_rpn_llm(start_step=0, checkpoint_path=None, model_type="rdt", max_step
                 log_dict["val_token_accuracy"] = val_tok_acc
             wandb.log(log_dict, step=step+1)
     
-        if (step+1) % 16000 == 0:
+        if (step+1) % 8000 == 0:
             checkpoint = {
                 'model': model.state_dict(),
                 'optimizer': optimizer.state_dict(),
@@ -328,7 +343,7 @@ def train_rpn_llm(start_step=0, checkpoint_path=None, model_type="rdt", max_step
             print(f"Model checkpoint saved to rpn_llm/models/{run_name}_{step+1}.pt")
    
     wandb.finish()
-    if (step+1) % 16000 != 0:
+    if (step+1) % 8000 != 0:
         torch.save(checkpoint, f'rpn_llm/models/{run_name}_{step+1}.pt')
         print(f"Model checkpoint saved to rpn_llm/models/{run_name}_{step+1}.pt")
 
@@ -338,9 +353,9 @@ if __name__ == "__main__":
     # Positional args
     parser.add_argument("start_step", type=int, nargs="?", default=0, help="Step to resume from")
     parser.add_argument("checkpoint_path", type=str, nargs="?", default=None, help="Path to checkpoint")
-    parser.add_argument("--model", type=str, default="rdt", choices=["rope", "ut", "rdt"], help="Model architecture to train")
-    parser.add_argument("--max_steps", type=int, default=80000, help="Total steps to train for (default 80000)")
-    parser.add_argument("--dataset", type=str, default="1-22_tens_comp_clean_tiered", help="Dataset prefix")
+    parser.add_argument("--model", type=str, default="rope", choices=["rope", "ut", "rdt"], help="Model architecture to train")
+    parser.add_argument("--max_steps", type=int, default=64000, help="Total steps to train for (default 80000)")
+    parser.add_argument("--dataset", type=str, default="1-22_uniform_BOS", help="Dataset prefix")
     
     args = parser.parse_args()
         
