@@ -110,3 +110,28 @@ Total Failures Analyzed: 2928
 - **Example**
    -  "\[BOS\](123)(456)+?"
 
+### Accuracy
+|Models/Steps|16000|32000|48000|64000|
+|---|---|---|---|---|
+|ROPE|96.56%||99.94%|99.99%|
+|RDT|97.64%||99.93%|
+|UT|92.58%||99.84%|
+
+### Analysis
+- Reversal failed is the only reason for failures even at 16000 steps for all 3 models.
+- At 16000 steps, reversal failures are not concentrated on 1 digit numbers. Instead failures are spread out, with some 20% concentration on 17 digits and a little less on than 10% on 16 and 18 digits.
+- brackets are able to overcome problem faced with identifying num1. 
+
+
+## Data: Document Masking + 1-22_uniform_BOS
+As brackets were able to train well, thinking is that model training is complicating how model sees num1. This is because in batch training all inputs are 256 length long, so when model is guessing num1 reversal it sees a lot of data before [BOS] from previous examples in batch. So if num1 is small the data before [BOS] is even more. the Attention mechanism is trying to guess num1 reversal based on all the data it sees. To overcome this we document mask the tokens before [BOS]. 
+
+### Accuracy
+|Models/Steps|16000|32000|48000|
+|---|---|---|---|
+|ROPE|98.42%|99.71%|99.94%
+
+### Analysis
+- The model with document masking is able to learn as well as bracketed prompts.
+- Reversal failures at 16k steps are spread evenly just like bracketed prompts. 
+- Next step. Find smallest ROPE model that can solve this problem.
