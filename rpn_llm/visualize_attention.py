@@ -127,6 +127,6 @@ def visualize_attention(checkpoint_path, prompt_str, output_path="rpn_llm/inspec
 
 if __name__ == "__main__":
     import sys
-    ckpt = sys.argv[2] if len(sys.argv) > 2 else "rpn_llm/models/UT3M_1-22_tens_comp_clean_final.pt"
-    prompt = sys.argv[1] if len(sys.argv) > 1 else "123 456 +? <321 654 +=:" # Example
+    ckpt = sys.argv[2] if len(sys.argv) > 2 else "rpn_llm/models/rope1.6M_1-22_uniform_BOS_80000.pt"
+    prompt = sys.argv[1] if len(sys.argv) > 1 else "[BOS]123 456+?<321 654 +=3+6+0=" # Example
     visualize_attention(ckpt, prompt)

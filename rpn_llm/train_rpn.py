@@ -211,8 +211,8 @@ def train_rpn_llm(start_step=0, checkpoint_path=None, model_type="rdt", max_step
         config = GPTConfig(vocab_size=64, n_layer=n_layer, n_head=n_head, n_embd=n_embd, block_size=2048, universal=True)
     elif model_type == "rope":
         from model_rope import GPT, GPTConfig
-        # Stage: Scaling down to find the minimal model
-        n_layer, n_head, n_embd = 2, 4, 256
+        # Stage: The "Wide" Lite Model to test Reversal Capacity
+        n_layer, n_head, n_embd = 2, 6, 384
         config = GPTConfig(vocab_size=64, n_layer=n_layer, n_head=n_head, n_embd=n_embd, block_size=512, universal=False)
 
     model = GPT(config)
