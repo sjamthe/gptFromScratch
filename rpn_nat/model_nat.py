@@ -195,16 +195,29 @@ class GPT(nn.Module):
         # Document Masking: Create a mask that prevents attention from crossing [BOS] (ID 2)
         # Only relevant during training (T > 1)
         attn_mask = None
-        if T > 1: #only for training and validation not inference. as there is no padding at inference
-            # seq_ids tracks which "problem" each token belongs to in the stream
-            # [BOS] tokens (id 2) increment the sequence counter
-            is_bos = (idx == 2)
-            seq_ids = is_bos.cumsum(dim=-1) # (B, T)
+        if T > 1:
+            # Only the FIRST token in a sequence can be a real document separator
+            # Our NAT masks (also ID 2) should not trigger a new document.
+            is_real_bos = (idx == 2)
+            # In a NAT batch from NATDataset, we only have one problem per row.
+            # But to keep it robust for the data-loader stream:
+            # We only count a BOS as a separator if it's at index 0 OR 
+            # if it was preceded by something that wasn't a mask. 
+            # For simplicity in this isolated dataset, we can just use the first BOS.
+            seq_ids = torch.zeros_like(idx) 
+            # If we want to support multiple problems per row (DataLoaderLite style):
+            # seq_ids = (is_real_bos).cumsum(dim=-1)
+            # But for now, we'll just ensure the answer slots don't break attention.
+            # We'll just set seq_ids to 0 for the whole row since NATDataset is isolated.
+            seq_ids = torch.zeros((B, T), device=idx.device, dtype=torch.long)
+            
             # doc_mask is True only for tokens in the same problem
             doc_mask = (seq_ids.unsqueeze(1) == seq_ids.unsqueeze(2)) # (B, T, T)
             # causal_mask is standard lower triangular
-            causal_mask = torch.tril(torch.ones(T, T, device=idx.device, dtype=torch.bool))
-            # Combine them
+            # NAT Model: Bidirectional Mask!
+            # We remove torch.tril to allow tokens to see the entire prompt sequence.
+            # (No future answer tokens are present in the input sequence, so it cannot cheat).
+            causal_mask = torch.ones(T, T, device=idx.device, dtype=torch.bool)
             full_mask = doc_mask & causal_mask # (B, T, T)
             attn_mask = full_mask.unsqueeze(1) # (B, 1, T, T) for head broadcasting
 
@@ -295,7 +308,7 @@ class GPT(nn.Module):
             logits = self.lm_head(x)
             loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1))
         else:
-            logits = self.lm_head(x[:, [-1], :])
+            logits = self.lm_head(x)
             
         if return_attention:
             return logits, loss, present_key_values, all_weights

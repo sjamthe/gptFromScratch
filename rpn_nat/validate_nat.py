@@ -1,0 +1,566 @@
+import os
+import re
+import torch
+import json
+import time
+from collections import defaultdict
+from NATDataset import nat_collate_fn
+from utils import RPNTokenizer
+from model_nat import GPT, GPTConfig
+
+VALIDATION_SET_RATIO = 0.025
+
+def calculate_carries(a_str, b_str, op):
+    a, b = int(a_str), int(b_str)
+    if op == '-' and a < b:
+        a_str, b_str = b_str, str(a).zfill(len(b_str))
+        
+    a_digits = [int(x) for x in reversed(a_str)]
+    b_digits = [int(x) for x in reversed(b_str)]
+    
+    max_len = max(len(a_digits), len(b_digits))
+    a_digits += [0] * (max_len - len(a_digits))
+    b_digits += [0] * (max_len - len(b_digits))
+    
+    carries = 0
+    carry_val = 0
+    if op == '+':
+        for i in range(max_len):
+            if a_digits[i] + b_digits[i] + carry_val > 9:
+                carries += 1
+                carry_val = 1
+            else:
+                carry_val = 0
+    elif op == '-':
+        for i in range(max_len):
+            if a_digits[i] - b_digits[i] - carry_val < 0:
+                carries += 1
+                carry_val = 1
+            else:
+                carry_val = 0
+    return carries
+
+def validate_model(checkpoint_path, test_file_path, output_fail_path, arch=None, num_passes=None, early_stop=None):
+    device = 'cuda' if torch.cuda.is_available() else 'mps' if torch.backends.mps.is_available() else 'cpu'
+    print(f"Using device: {device}")
+
+    # 1. Load Model (NAT Architecture)
+    print(f"Loading NAT checkpoint {checkpoint_path}...")
+    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
+    config = checkpoint['config']
+    
+    model = GPT(config)
+    model.load_state_dict(checkpoint['model'])
+    model.to(device)
+    model.eval()
+
+    tokenizer = RPNTokenizer("rpn_llm/rpn-tokenizer.json")
+    
+    # 2. Parse Test File
+    print(f"Parsing test file {test_file_path}...")
+    with open(test_file_path, "r", encoding="utf-8") as f:
+        raw_lines = f.readlines()
+        
+    lines = []
+    for line in raw_lines:
+        clean_line = re.sub(r'\s+', ' ', line.strip()) + '\n'
+        lines.append(clean_line)
+    del raw_lines
+        
+    # 3. Group by prompt token length to avoid padding issues
+    # A prompt is everything up to and including the '=' sign and the trailing space. 
+    length_groups = defaultdict(list)
+    eq_id = tokenizer.encode("?")[0]
+    nl_id = tokenizer.encode("\n")[0]
+    
+    print("Grouping by prompt length...")
+    for line in lines:
+        if "?" not in line:
+            continue
+        
+        # Find index of '?'
+        try:
+            sep_idx = line.index("?")
+        except ValueError:
+            continue
+            
+        length_groups[sep_idx + 1].append(line.rstrip())
+        
+    # free lines memory
+    del lines
+    
+    print(f"Grouped into {len(length_groups)} different prompt lengths.")
+    
+    # 4. Batched Generation
+    max_batch_size = 256 # Dropped surgically to prevent Apple MPS fragmenting the KV Cache memory allocation bounds!
+    failures = []
+    total_processed = 0
+    total_correct = 0
+    reversal_success = 0
+    
+    total_by_carry = defaultdict(int)
+    correct_by_carry = defaultdict(int)
+    
+    edge_stats = {
+        'zero_operand': {'total': 0, 'correct': 0},
+        'negative_result': {'total': 0, 'correct': 0},
+        'normal': {'total': 0, 'correct': 0}
+    }
+    
+    structural_failures = defaultdict(int)
+    
+    # Max generation steps for an answer
+    max_new_tokens = 256
+
+    # Enhanced Failure Categorization
+    failure_categories = {
+        'reversal_skipped': 0,
+        'reversal_failed': 0,
+        'math_failed': 0,
+        'only_final_ans_failed': 0
+    }
+    reversal_fail_by_spaces = defaultdict(int) # Key: (s1_len, s2_len)
+    reversal_pos_failures = {'num1': 0, 'num2': 0, 'both': 0, 'malformed': 0}
+    reversal_digit_failures = defaultdict(int) # Key: num_digits
+
+    total_items = sum(len(items) for items in length_groups.values())
+    start_time = time.time()
+    overall_tokens_gen = 0
+    total_tokens_count = 0
+    total_tokens_correct = 0
+    fail_tokens_count = 0
+    fail_tokens_correct = 0
+
+    # Ensure output file is freshly clean before append looping!
+    with open(output_fail_path, "w", encoding="utf-8") as f:
+        f.write("--- Real-time Validation Failures ---\n\n")
+
+    max_rows = int(VALIDATION_SET_RATIO*total_items/len(length_groups))
+    print(f"Beginning batched evaluation on {max_rows} rows per group...")
+    accuracy_by_length = {}
+    
+    # --- STEP-BY-STEP STATS ---
+    step_failure_counts = defaultdict(int) 
+    step_success_counts = defaultdict(int) 
+    step_accuracy_list = defaultdict(int) # Key: step, Value: count of items correct AT THIS STEP
+    corrupted_count = 0 # Items correct at step 0 but wrong at the end
+    
+    group_idx = 1
+    for length, items in length_groups.items():
+        print(f"\n--- Evaluating group {group_idx}/{len(length_groups)} (prompt length {length}) - {len(items)} items ---")
+        group_total_processed = 0
+        group_total_correct = 0
+        group_idx += 1
+        
+        # Process in chunks of max_batch_size. only validate a fraction of the data
+        for i in range(0, min(max_rows, len(items)), max_batch_size):
+            batch_items = items[i:i+max_batch_size]
+            B = len(batch_items)
+            
+            batch_prompt_tokens = []
+            expected_strs = []
+            expected_tokens_list = []
+            prompt_strs = []
+            
+            for line_str in batch_items:
+                line_tokens = tokenizer.encode(line_str)
+                try:
+                    sep_idx = line_tokens.index(eq_id)
+                except ValueError:
+                    # Fallback if '?' is missing for some reason
+                    sep_idx = len(line_tokens) - 1
+                    
+                prompt_tokens = line_tokens[:sep_idx + 1]
+                expected_tokens_list.append(line_tokens[sep_idx + 1:])
+                
+                batch_prompt_tokens.append(prompt_tokens)
+                prompt_strs.append(tokenizer.decode(prompt_tokens).strip())
+                expected_strs.append(line_str.split('?', 1)[1].strip())
+            
+            # Construct (B, L) tensor natively
+            prompts = torch.tensor(batch_prompt_tokens, dtype=torch.long, device=device)
+            
+            # --- ITERATIVE REFINEMENT GENERATION WITH FIXED ALIGNMENT (32) ---
+            t0 = time.time()
+            
+            W_START = 32
+            max_answer_len = 128
+            max_refine_steps = 5 # Reducing for speed in validation
+            
+            # Initialize full batch: [Prompts] + [Padding] + [Answer Slots]
+            current_full_tokens = torch.full((B, W_START + max_answer_len), 2, dtype=torch.long, device=device)
+            # Copy prompts into the start
+            current_full_tokens[:, :prompts.size(1)] = prompts
+            
+            for refine_step in range(max_refine_steps):
+                with torch.no_grad():
+                    with torch.autocast(device, dtype=torch.bfloat16):
+                        logits, _ = model(current_full_tokens)
+                        # In Fixed Alignment, Answer[i] is predicted at index W_START + i
+                        ans_logits = logits[:, W_START:, :]
+                        new_ans_preds = torch.argmax(ans_logits, dim=-1)
+                
+                # Update only the answer slots in the full sequence
+                current_full_tokens[:, W_START:] = new_ans_preds
+            
+            t1 = time.time()
+            idx = current_full_tokens
+            
+            if device == "mps":
+                torch.mps.empty_cache()
+            
+            t1 = time.time()
+            batch_time = t1 - t0
+            overall_tokens_gen += B * max_refine_steps * prompts.size(1) # Approximation
+            tokens_per_sec = (B * max_answer_len) / batch_time if batch_time > 0 else 0
+            
+            total_processed += B
+            group_total_processed += B
+            pct_complete = (total_processed / total_items) * 100
+                            
+            # Extract and verify the generated characters
+            for b in range(B):
+                # In Fixed Alignment, generated answer tokens always start at W_START
+                gen_answer_tokens = idx[b, W_START:].tolist()
+                
+                # Truncate at the first clear terminator (Newline, UNK, or PAD)
+                # But only if it appears AFTER some initial tokens to prevent early-kill
+                terminators = [nl_id, 1, 0] # \n, [UNK], [PAD]
+                first_term = 999
+                for t in terminators:
+                    if t in gen_answer_tokens:
+                        idx_t = gen_answer_tokens.index(t)
+                        # Only truncate if it's not at the very beginning (e.g. index > 5)
+                        if idx_t > 5:
+                            first_term = min(first_term, idx_t)
+                
+                if first_term != 999:
+                    gen_answer_tokens = gen_answer_tokens[:first_term]
+
+                # Compare
+                expected_str = expected_strs[b]
+                predicted_str = tokenizer.decode(gen_answer_tokens).strip() 
+                prompt_str = prompt_strs[b]
+                
+                # New regex-based operand extraction for (n1)(n2)op? format
+                m = re.search(r"(?:\( *)?(\d+)(?: *\))?(\s*)(?:\( *)?(\d+)(?: *\))?(\s*)([+\-])\?", prompt_str)
+                
+                # Robust extraction
+                expected_ans_str = expected_str.split('>')[-1].replace('[UNK]', '').replace('[PAD]', '').strip()
+                predicted_ans_str = predicted_str.split('>')[-1].replace('[UNK]', '').replace('[PAD]', '').strip() if '>' in predicted_str else ""
+                
+                # Use the pre-sliced tokens from the original line to avoid re-encoding shifts
+                expected_tokens = expected_tokens_list[b]
+                
+                # Truncate expected_tokens at newline to match the generation limit
+                if nl_id in expected_tokens:
+                    expected_tokens = expected_tokens[:expected_tokens.index(nl_id)+1]
+
+                match_count = 0
+                for t_idx in range(min(len(gen_answer_tokens), len(expected_tokens))):
+                    if gen_answer_tokens[t_idx] == expected_tokens[t_idx]:
+                        match_count += 1
+                
+                total_tokens_count += len(expected_tokens)
+                total_tokens_correct += match_count
+                
+                is_correct = (expected_ans_str == predicted_ans_str)
+                if not is_correct:
+                    fail_tokens_count += len(expected_tokens)
+                    fail_tokens_correct += match_count
+
+                carries = 0
+                is_zero = False
+                if m:
+                    n1_str, _, n2_str, _, op = m.groups()
+                    try:
+                        p0_val = int(n1_str); p1_val = int(n2_str)
+                        is_zero = (p0_val == 0 or p1_val == 0)
+                        carries = calculate_carries(n1_str, n2_str, op)
+                    except ValueError: pass
+                
+                is_neg = expected_ans_str.startswith('-')
+                is_normal = not is_zero and not is_neg
+                
+                total_by_carry[carries] += 1
+                if is_zero: edge_stats['zero_operand']['total'] += 1
+                if is_neg: edge_stats['negative_result']['total'] += 1
+                if is_normal: edge_stats['normal']['total'] += 1
+
+                # Helper to split RPN parts
+                def split_rpn(s):
+                    # Find the operator-equal delimiter
+                    delim = "+=" if "+=" in s else "-=" if "-=" in s else None
+                    if delim:
+                        prefix = s.split(delim)[0] + delim
+                        rest = s.split(delim)[1]
+                    else:
+                        prefix = ""
+                        rest = s
+                    math = rest.split('>')[0] if '>' in rest else ""
+                    ans = s.split('>')[-1].split('[UNK]')[0].split('\n')[0].strip() if '>' in s else ""
+                    return prefix, math, ans
+
+                exp_pre, exp_math, exp_ans_final = split_rpn(expected_str)
+                pred_pre, pred_math, pred_ans_final = split_rpn(predicted_str)
+                
+                # Check absolute truth of final numerical output!
+                if expected_ans_str != predicted_ans_str:
+                    # Categorize failure
+                    s1 = m.group(2) if m else " "
+                    s2 = m.group(4) if m else ""
+                    space_key = (len(s1), len(s2))
+
+                    # NEW Structural Failure Categorization
+                    mismatch_idx = -1
+                    for i in range(len(expected_tokens)):
+                        if i >= len(gen_answer_tokens) or gen_answer_tokens[i] != expected_tokens[i]:
+                            mismatch_idx = i
+                            break
+                    
+                    fail_reason = "[UNKNOWN]"
+                    if mismatch_idx == -1:
+                        # If everything matched up to expected_tokens len, but length is different
+                        if len(gen_answer_tokens) != len(expected_tokens):
+                            fail_reason = "[LEN_MISMATCH]"
+                        else:
+                            fail_reason = "[CORRECT]" # Should not happen if is_correct is False
+                    else:
+                        # Categorize based on the character at mismatch_idx in expected_str
+                        prefix_tokens = expected_tokens[:mismatch_idx+1]
+                        prefix_str = tokenizer.decode(prefix_tokens)
+                        
+                        if mismatch_idx == 0:
+                            fail_reason = "[MISSING_START]"
+                        elif '>' in prefix_str:
+                            fail_reason = "[FAIL_ANS]"
+                        elif '=' in prefix_str and mismatch_idx > prefix_str.find('='):
+                            fail_reason = "[FAIL_MATH]"
+                        elif prefix_str.count(' ') == 0:
+                            fail_reason = "[FAIL_REV1]"
+                        elif prefix_str.count(' ') == 1:
+                            fail_reason = "[FAIL_REV2]"
+                        else:
+                            fail_reason = "[FAIL_MATH]"
+
+                    if "[FAIL_REV" not in fail_reason and "[MISSING_START]" not in fail_reason:
+                        reversal_success += 1
+
+                    is_reversal_skip = (fail_reason == "[REV_SKIP]")
+                    is_reversal_fail = ("FAIL_REV" in fail_reason or "MISSING_START" in fail_reason)
+                    is_math_fail = (fail_reason == "[FAIL_MATH]")
+
+                    matched = False
+                    if is_reversal_skip:
+                        failure_categories['reversal_skipped'] += 1
+                        matched = True
+                    
+                    if is_reversal_fail:
+                        failure_categories['reversal_failed'] += 1
+                        matched = True
+                        reversal_fail_by_spaces[space_key] += 1
+                        
+                        # Analyze WHICH number failed in the reversal
+                        try:
+                            exp_parts = exp_pre.replace('<', '').split()
+                            pred_parts = pred_pre.replace('<', '').split()
+                            if len(exp_parts) >= 2 and len(pred_parts) >= 2:
+                                exp_n1_rev, exp_n2_rev = exp_parts[0], exp_parts[1]
+                                pred_n1_rev, pred_n2_rev = pred_parts[0], pred_parts[1]
+                                n1_fail = exp_n1_rev != pred_n1_rev
+                                n2_fail = exp_n2_rev != pred_n2_rev
+                                if n1_fail and n2_fail:
+                                    reversal_pos_failures['both'] += 1
+                                    reversal_digit_failures[len(exp_n1_rev)] += 1
+                                    reversal_digit_failures[len(exp_n2_rev)] += 1
+                                elif n1_fail:
+                                    reversal_pos_failures['num1'] += 1
+                                    reversal_digit_failures[len(exp_n1_rev)] += 1
+                                elif n2_fail:
+                                    reversal_pos_failures['num2'] += 1
+                                    reversal_digit_failures[len(exp_n2_rev)] += 1
+                                else:
+                                    reversal_pos_failures['malformed'] += 1
+                            else:
+                                reversal_pos_failures['malformed'] += 1
+                        except: 
+                            reversal_pos_failures['malformed'] += 1
+                    
+                    if is_math_fail:
+                        failure_categories['math_failed'] += 1
+                        matched = True
+                    
+                    if not matched:
+                        failure_categories['only_final_ans_failed'] += 1
+
+                    # Document failure with specific reason
+                    structural_failures[fail_reason] += 1
+                    fail_str = f"{fail_reason:<16} Q: {prompt_str} | Expected: {expected_ans_str} | Predicted: {predicted_ans_str} | Full Pred: {predicted_str}"
+                    failures.append(fail_str)
+                    # Stream directly to disk live!
+                    with open(output_fail_path, "a", encoding="utf-8") as f:
+                        f.write(fail_str + "\n")
+                else:
+                    total_correct += 1
+                    group_total_correct += 1
+                    correct_by_carry[carries] += 1
+                    if is_zero: edge_stats['zero_operand']['correct'] += 1
+                    if is_neg: edge_stats['negative_result']['correct'] += 1
+                    if is_normal: edge_stats['normal']['correct'] += 1
+
+            # print accuracy
+            accuracy = (total_correct / total_processed) * 100
+            group_accuracy = (group_total_correct / group_total_processed) * 100
+            accuracy_by_length[length] = group_accuracy
+            
+            running_token_acc = (total_tokens_correct / total_tokens_count) * 100 if total_tokens_count > 0 else 0
+            fail_token_acc = (fail_tokens_correct / fail_tokens_count) * 100 if fail_tokens_count > 0 else 0
+            
+            print(f"Progress: {total_processed}/{total_items} ({pct_complete:.2f}%) | Acc: {accuracy:.2f}% | Token Acc: {running_token_acc:.2f}% | Fail Token Acc: {fail_token_acc:.2f}% | Group {group_idx-1} Acc: {group_accuracy:.2f}% | Tokens/sec: {tokens_per_sec:.1f}")
+            for cat, count in failure_categories.items():
+                print(f"{cat:<20}: {count}")
+
+    # 5. Output Results
+    accuracy = (total_correct / total_processed) * 100
+    # Reversal success is (successful reversals that failed math) + (totally correct problems)
+    total_reversal_success = reversal_success + total_correct
+    reversal_acc = (total_reversal_success / total_processed) * 100
+    final_token_acc = (total_tokens_correct / total_tokens_count) * 100 if total_tokens_count > 0 else 0
+    final_fail_token_acc = (fail_tokens_correct / fail_tokens_count) * 100 if fail_tokens_count > 0 else 0
+
+    print(f"\n=====================")
+    print(f"Validation Complete!")
+    print(f"Total Evaluated: {total_processed}")
+    print(f"Reversal Accuracy: {reversal_acc:.2f}%")
+    print(f"Full Math Accuracy: {accuracy:.2f}%")
+    print(f"Global Token Accuracy: {final_token_acc:.2f}%")
+    print(f"Failure Token Accuracy: {final_fail_token_acc:.2f}%")
+    
+    with open(output_fail_path, "a", encoding="utf-8") as f:
+        f.write(f"\nReversal Accuracy: {reversal_acc:.2f}%\n")
+        f.write(f"Full Math Accuracy: {accuracy:.2f}% ({total_correct}/{total_processed})\n")
+        f.write("=========================================\n\n")
+
+        f.write("\n--- Breakdown by Prompt Length ---\n")
+        f.write("Token Length | Total Items | Accuracy\n")
+        for g in sorted(accuracy_by_length.keys()):
+            stats = f"{g:2d} | {len(length_groups[g]):<10} | {accuracy_by_length[g]:.2f}%"
+            f.write(stats + "\n")
+            
+        f.write("\n--- Breakdown by Carry Operations ---\n")
+        f.write("Carries | Total   | Correct | Failures | Accuracy\n")
+        
+    print("\n--- Breakdown by Carry Operations ---")
+    print("Carries | Total   | Correct | Failures | Accuracy")
+    for c in sorted(total_by_carry.keys()):
+        tot = total_by_carry[c]
+        cor = correct_by_carry[c]   
+        fls = tot - cor
+        acc = (cor / tot) * 100 if tot > 0 else 0
+        stats = f"{c:<8}| {tot:<8}| {cor:<8}| {fls:<8}| {acc:.2f}%"
+        print(stats)
+        with open(output_fail_path, "a", encoding="utf-8") as f:
+            f.write(stats + "\n")
+            
+    with open(output_fail_path, "a", encoding="utf-8") as f:
+        f.write("\n--- Edge Case Analysis ---\n")
+        f.write(f"{'Category':<16} | {'Total':<8} | {'Correct':<8} | Accuracy\n")
+        for cat, stats in edge_stats.items():
+            tot = stats['total']
+            cor = stats['correct']
+            acc = (cor / tot) * 100 if tot > 0 else 0
+            f.write(f"{cat:<16} | {tot:<8} | {cor:<8} | {acc:.2f}%\n")
+            
+    print("\n--- Edge Case Analysis ---")
+    print(f"{'Category':<16} | {'Total':<8} | {'Correct':<8} | Accuracy")
+    for cat, stats in edge_stats.items():
+        tot = stats['total']
+        cor = stats['correct']
+        acc = (cor / tot) * 100 if tot > 0 else 0
+        print(f"{cat:<16} | {tot:<8} | {cor:<8} | {acc:.2f}%")
+
+    print("\n--- Refinement Step Statistics ---")
+    print(f"{'Step':<8} | {'Items Correct (Snapshot)':<25} | {'First Failures':<15} | {'Remaining Perfect'}")
+    for s in range(max_refine_steps):
+        snap_acc = step_accuracy_list[s]
+        fails = step_failure_counts[s]
+        perfect = step_success_counts[s]
+        print(f"{s:<8} | {snap_acc:<25} | {fails:<15} | {perfect}")
+        
+    print(f"\nTotal Corrupted (Correct at S0, but failed later): {corrupted_count} ({corrupted_count/total_processed*100:.1f}%)")
+
+    # Detailed Failure Analysis Output
+    print("\n--- Failure Category Breakdown ---")
+    total_fails = len(failures)
+    for cat, count in failure_categories.items():
+        pct = (count / total_fails * 100) if total_fails > 0 else 0
+        print(f"{cat:<20}: {count} ({pct:.1f}%)")
+
+    if structural_failures:
+        print("\n--- Structural Failure Analysis (First Mismatch) ---")
+        for reason, count in sorted(structural_failures.items(), key=lambda x: x[1], reverse=True):
+            pct = (count / total_fails * 100) if total_fails > 0 else 0
+            print(f"{reason:<20}: {count} ({pct:.1f}%)")
+    
+    if reversal_fail_by_spaces:
+        print("\n--- Reversal Failures vs Spaces (S1, S2) ---")
+        total_rev_fails = sum(reversal_fail_by_spaces.values())
+        for spaces, count in sorted(reversal_fail_by_spaces.items()):
+            pct = (count / total_rev_fails * 100) if total_rev_fails > 0 else 0
+            print(f"Spaces {spaces}: {count} failures ({pct:.1f}%)")
+
+        print("\n--- Reversal Failure Analysis (Position & Length) ---")
+        total_pos_fails = sum(reversal_pos_failures.values())
+        for pos, count in reversal_pos_failures.items():
+            pct = (count / total_pos_fails * 100) if total_pos_fails > 0 else 0
+            print(f"Failed on {pos:<8}: {count} ({pct:.1f}%)")
+            
+        print("\nReversal Failures by Digit Length:")
+        total_digit_fails = sum(reversal_digit_failures.values())
+        for length in sorted(reversal_digit_failures.keys()):
+            count = reversal_digit_failures[length]
+            pct = (count / total_digit_fails * 100) if total_digit_fails > 0 else 0
+            print(f"{length:2d} digits: {count} failures ({pct:.1f}%)")
+
+    with open(output_fail_path, "a", encoding="utf-8") as f:
+        f.write("\n--- Failure Category Breakdown ---\n")
+        for cat, count in failure_categories.items():
+            pct = (count / total_fails * 100) if total_fails > 0 else 0
+            f.write(f"{cat:<20}: {count} ({pct:.1f}%)\n")
+        
+        if reversal_fail_by_spaces:
+            f.write("\n--- Reversal Failures vs Spaces (S1, S2) ---\n")
+            total_rev_fails = sum(reversal_fail_by_spaces.values())
+            for spaces, count in sorted(reversal_fail_by_spaces.items()):
+                pct = (count / total_rev_fails * 100) if total_rev_fails > 0 else 0
+                f.write(f"Spaces {spaces}: {count} failures ({pct:.1f}%)\n")
+
+            f.write("\n--- Reversal Failure Analysis (Position & Length) ---\n")
+            total_pos_fails = sum(reversal_pos_failures.values())
+            for pos, count in reversal_pos_failures.items():
+                pct = (count / total_pos_fails * 100) if total_pos_fails > 0 else 0
+                f.write(f"Failed on {pos:<8}: {count} ({pct:.1f}%)\n")
+                
+            f.write("\nReversal Failures by Digit Length:\n")
+            total_digit_fails = sum(reversal_digit_failures.values())
+            for length in sorted(reversal_digit_failures.keys()):
+                count = reversal_digit_failures[length]
+                pct = (count / total_digit_fails * 100) if total_digit_fails > 0 else 0
+                f.write(f"{length:2d} digits: {count} failures ({pct:.1f}%)\n")
+
+if __name__ == "__main__":
+    import argparse
+    parser = argparse.ArgumentParser(description="Validate RPN Transformer")
+    parser.add_argument("--model", type=str, default="rpn_nat/models/rope3.6M_1-22_uniform_BOS_24000.pt", help="Path to checkpoint")
+    parser.add_argument("--test_file", type=str, default="rpn_llm/data/RPNData-1-22_uniform_BOS_val.txt", help="Path to test file")
+    parser.add_argument("--output_file", type=str, default=None, help="Path to output failure file (auto-generated if not provided)")
+    
+    args = parser.parse_args()
+    
+    if args.output_file is None:
+        model_basename = os.path.basename(args.model)
+        model_name = model_basename.replace(".pt", "")
+        args.output_file = f"rpn_nat/results/{model_name}_failures.txt"
+        os.makedirs("rpn_nat/results", exist_ok=True)
+
+    validate_model(args.model, args.test_file, args.output_file)
