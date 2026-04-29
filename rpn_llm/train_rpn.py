@@ -10,9 +10,9 @@ from utils import RPNTokenizer, DataLoaderLite
 
 def run_teacher_forcing_validation(model, val_loader, device, step):
     tokenizer = RPNTokenizer("rpn_llm/rpn-tokenizer.json")
-    gt_id  = tokenizer.encode(">")[0]
+    ans_id = tokenizer.encode("[ANS]")[0]
     unk_id = tokenizer.encode("[UNK]")[0]
-    nl_id = tokenizer.encode("\n")[0]
+    eos_id = tokenizer.encode("[EOS]")[0]
     pad_id = tokenizer.encode("[PAD]")[0]
     bos_id = tokenizer.encode("[BOS]")[0]
     pad_id = 0 # [PAD] is 0
@@ -45,8 +45,8 @@ def run_teacher_forcing_validation(model, val_loader, device, step):
             preds = torch.argmax(logits, dim=-1)
             
             # 1. Global Token-Level Accuracy
-            # Mask out non-content tokens (UNK, NL, PAD, BOS) and non-target tokens (-100)
-            valid_mask = (y_val != unk_id) & (y_val != nl_id) & (y_val != pad_id) & (y_val != bos_id) & (y_val != -100)
+            # Mask out non-content tokens (UNK, EOS, PAD, BOS) and non-target tokens (-100)
+            valid_mask = (y_val != unk_id) & (y_val != eos_id) & (y_val != pad_id) & (y_val != bos_id) & (y_val != -100)
             val_token_correct_accum += ((preds == y_val) & valid_mask).sum().item()
             val_token_target_accum += valid_mask.sum().item()
 
@@ -57,7 +57,7 @@ def run_teacher_forcing_validation(model, val_loader, device, step):
             for b in range(y_val.size(0)):
                 gt_pos_y = None
                 for t in range(y_val.shape[1] - 1, -1, -1):
-                    if y_val[b, t].item() == gt_id:
+                    if y_val[b, t].item() == ans_id:
                         gt_pos_y = t
                         break
 
@@ -72,7 +72,7 @@ def run_teacher_forcing_validation(model, val_loader, device, step):
                     tok_y = y_cpu[b, offset]
                     tok_p = preds_cpu[b, offset]
 
-                    if tok_y in (unk_id, nl_id, pad_id):
+                    if tok_y in (unk_id, eos_id, pad_id):
                         break
                     if tok_y != tok_p:
                         equation_correct = False
@@ -101,8 +101,8 @@ def run_generation_validation(model, val_loader, device, step, num_batches=4):
     """
     tokenizer = RPNTokenizer("rpn_llm/rpn-tokenizer.json")
     sep_id = tokenizer.encode("?")[0]
-    gt_id = tokenizer.encode(">")[0]
-    nl_id = tokenizer.encode("\n")[0]
+    ans_id = tokenizer.encode("[ANS]")[0]
+    eos_id = tokenizer.encode("[EOS]")[0]
     
     model.eval()
     total_correct = 0
@@ -136,9 +136,9 @@ def run_generation_validation(model, val_loader, device, step, num_batches=4):
                 
                 # Extract the expected final answer (after last >)
                 target_str = tokenizer.decode(full_target_seq)
-                if ">" not in target_str:
+                if "[ANS]" not in target_str:
                     continue
-                expected_answer = target_str.split(">")[-1].split("[UNK]")[0].split("\n")[0].strip()
+                expected_answer = target_str.split("[ANS]")[-1].split("[UNK]")[0].split("[EOS]")[0].strip()
                 
                 # --- GENERATION ---
                 idx = prompt_tokens
@@ -146,15 +146,19 @@ def run_generation_validation(model, val_loader, device, step, num_batches=4):
                 generated_tokens = []
                 
                 for _ in range(max_new_tokens):
+                    # Track phases for KV cache mask
+                    is_phase_shift = (idx == 10) | (idx == 11) | (idx == 12)
+                    full_phase_ids = is_phase_shift.cumsum(dim=-1)
+
                     idx_cond = idx[:, -1:] if past_kv is not None else idx
                     with torch.autocast(device, dtype=torch.bfloat16):
-                        logits, _, past_kv = model(idx_cond, use_cache=True, past_key_values=past_kv)
+                        logits, _, past_kv = model(idx_cond, use_cache=True, past_key_values=past_kv, full_phase_ids=full_phase_ids)
                     
                     logits = logits[:, -1, :]
                     idx_next = torch.argmax(logits, dim=-1, keepdim=True)
                     next_id = idx_next.item()
                     
-                    if next_id == nl_id:
+                    if next_id == eos_id:
                         break
                     
                     generated_tokens.append(next_id)
@@ -162,7 +166,7 @@ def run_generation_validation(model, val_loader, device, step, num_batches=4):
                 
                 # --- EVALUATION ---
                 pred_str = tokenizer.decode(generated_tokens)
-                pred_answer = pred_str.split(">")[-1].split("[UNK]")[0].split("\n")[0].strip() if ">" in pred_str else "N/A"
+                pred_answer = pred_str.split("[ANS]")[-1].split("[UNK]")[0].split("[EOS]")[0].strip() if "[ANS]" in pred_str else "N/A"
                 
                 if pred_answer == expected_answer:
                     total_correct += 1
