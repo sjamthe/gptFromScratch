@@ -203,10 +203,14 @@ def validate_model(checkpoint_path, test_file_path, output_fail_path, arch=None,
                 idx = torch.cat((idx, idx_next), dim=1) # Append
                 
                 # Apple MPS has a structural bug where tight internal `torch.cat` matrices 
-                # heavily defer Garbage Collection! Natively sync the caches securely!
-                if device == "mps":
+                # heavily defer Garbage Collection! Natively sync the caches securely every N steps.
+                if device == "mps" and (step + 1) % 32 == 0:
                     torch.mps.empty_cache()
             
+            # Final clear after each batch
+            if device == "mps":
+                torch.mps.empty_cache()
+
             t1 = time.time()
             batch_time = t1 - t0
             overall_tokens_gen += B * max_new_tokens

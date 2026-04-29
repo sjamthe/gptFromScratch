@@ -128,5 +128,13 @@ Model is more efficient and learns each phase better.
 |----------|-------------|
 | 91.67%   | 8k          |
 | 98.75%   | 32k         |
-|   | 56k         |
-|   | 64k         |
+| 99.47%   | 56k         |
+| 99.38%   | 64k         |
+
+<pre>
+--- Failure Category Breakdown ---
+reversal_skipped    : 0 (0.0%)
+reversal_failed     : 9 (21.4%)
+math_failed         : 36 (85.7%)
+only_final_ans_failed: 6 (14.3%)
+</pre>
