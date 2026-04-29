@@ -62,7 +62,8 @@ def validate_model(checkpoint_path, test_file_path, output_fail_path, arch=None,
     model.to(device)
     model.eval()
 
-    tokenizer = RPNTokenizer("rpn_llm/rpn-tokenizer.json")
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    tokenizer = RPNTokenizer(os.path.join(base_dir, "rpn-tokenizer.json"))
     
     # 2. Parse Test File
     print(f"Parsing test file {test_file_path}...")
@@ -79,7 +80,8 @@ def validate_model(checkpoint_path, test_file_path, output_fail_path, arch=None,
     # A prompt is everything up to and including the '=' sign and the trailing space. 
     length_groups = defaultdict(list)
     eq_id = tokenizer.encode("?")[0]
-    nl_id = tokenizer.encode("\n")[0]
+    eos_id = tokenizer.encode("[EOS]")[0]
+    ans_id = tokenizer.encode("[ANS]")[0]
     
     print("Grouping by prompt length...")
     for line in lines:
@@ -185,12 +187,16 @@ def validate_model(checkpoint_path, test_file_path, output_fail_path, arch=None,
             
             past_kv = None
             for step in range(max_new_tokens):
+                # Calculate full_phase_ids for masking
+                is_phase_shift = (idx == 10) | (idx == 11) | (idx == 12)
+                full_phase_ids = is_phase_shift.cumsum(dim=-1)
+
                 # If KV Cache is fully loaded, ONLY pass the raw isolated new single token forward!
                 idx_cond = idx[:, -1:] if past_kv is not None else idx
                 
                 with torch.no_grad():
                     with torch.autocast(device, dtype=torch.bfloat16):
-                        logits, _, past_kv = model(idx_cond, use_cache=True, past_key_values=past_kv, num_passes=num_passes, halt_on_logit_stability=early_stop)
+                        logits, _, past_kv = model(idx_cond, use_cache=True, past_key_values=past_kv, num_passes=num_passes, halt_on_logit_stability=early_stop, full_phase_ids=full_phase_ids)
                 
                 logits = logits[:, -1, :] # Pluck final step logits
                 idx_next = torch.argmax(logits, dim=-1, keepdim=True) # Deterministic greedy decision
@@ -220,29 +226,28 @@ def validate_model(checkpoint_path, test_file_path, output_fail_path, arch=None,
                 full_generated_tokens = idx[b].tolist()
                 gen_answer_tokens = full_generated_tokens[prompt_len:]
                 
-                # Truncate string sequence heavily at newline (to match exactly)
-                if nl_id in gen_answer_tokens:
-                    nl_idx = gen_answer_tokens.index(nl_id)
-                    gen_answer_tokens = gen_answer_tokens[:nl_idx+1]
+                # Truncate string sequence at [EOS] (to match exactly)
+                if eos_id in gen_answer_tokens:
+                    eos_idx = gen_answer_tokens.index(eos_id)
+                    gen_answer_tokens = gen_answer_tokens[:eos_idx+1]
                 
                 # Compare
                 expected_str = expected_strs[b]
                 predicted_str = tokenizer.decode(gen_answer_tokens).strip() 
                 prompt_str = prompt_strs[b]
                 
-                # New regex-based operand extraction for (n1)(n2)op? format
-                # Updated regex to handle both (n1) (n2)op? and n1 n2 op? formats with [BOS]
-                m = re.search(r"(?:\( *)?(\d+)(?: *\))?(\s*)(?:\( *)?(\d+)(?: *\))?(\s*)([+\-])\?", prompt_str)
+                # New regex to handle [BOS] and ?
+                m = re.search(r"(\d+)\s+(\d+)\s*([+\-])\?", prompt_str)
                 
-                expected_ans_str = expected_str.split('>')[-1].split('[UNK]')[0].split('\n')[0].strip() if '>' in expected_str else ""
-                predicted_ans_str = predicted_str.split('>')[-1].split('[UNK]')[0].split('\n')[0].strip() if '>' in predicted_str else ""
+                expected_ans_str = expected_str.split("[ANS]")[-1].split("[UNK]")[0].split("[EOS]")[0].strip() if "[ANS]" in expected_str else ""
+                predicted_ans_str = predicted_str.split("[ANS]")[-1].split("[UNK]")[0].split("[EOS]")[0].strip() if "[ANS]" in predicted_str else ""
                 
                 # Use the pre-sliced tokens from the original line to avoid re-encoding shifts
                 expected_tokens = expected_tokens_list[b]
                 
-                # Truncate expected_tokens at newline to match the generation limit
-                if nl_id in expected_tokens:
-                    expected_tokens = expected_tokens[:expected_tokens.index(nl_id)+1]
+                # Truncate expected_tokens at [EOS] to match the generation limit
+                if eos_id in expected_tokens:
+                    expected_tokens = expected_tokens[:expected_tokens.index(eos_id)+1]
 
                 match_count = 0
                 for t_idx in range(min(len(gen_answer_tokens), len(expected_tokens))):
@@ -260,7 +265,7 @@ def validate_model(checkpoint_path, test_file_path, output_fail_path, arch=None,
                 carries = 0
                 is_zero = False
                 if m:
-                    n1_str, _, n2_str, _, op = m.groups()
+                    n1_str, n2_str, op = m.groups()
                     try:
                         p0_val = int(n1_str); p1_val = int(n2_str)
                         is_zero = (p0_val == 0 or p1_val == 0)
@@ -275,19 +280,12 @@ def validate_model(checkpoint_path, test_file_path, output_fail_path, arch=None,
                 if is_neg: edge_stats['negative_result']['total'] += 1
                 if is_normal: edge_stats['normal']['total'] += 1
 
-                # Helper to split RPN parts
+                # Helper to split RPN parts for Phase format
                 def split_rpn(s):
-                    # Find the operator-equal delimiter
-                    delim = "+=" if "+=" in s else "-=" if "-=" in s else None
-                    if delim:
-                        prefix = s.split(delim)[0] + delim
-                        rest = s.split(delim)[1]
-                    else:
-                        prefix = ""
-                        rest = s
-                    math = rest.split('>')[0] if '>' in rest else ""
-                    ans = s.split('>')[-1].split('[UNK]')[0].split('\n')[0].strip() if '>' in s else ""
-                    return prefix, math, ans
+                    rev = s.split("[REV]")[-1].split("[MATH]")[0] if "[REV]" in s and "[MATH]" in s else ""
+                    math = s.split("[MATH]")[-1].split("[ANS]")[0] if "[MATH]" in s and "[ANS]" in s else ""
+                    ans = s.split("[ANS]")[-1].split("[EOS]")[0].strip() if "[ANS]" in s else ""
+                    return rev, math, ans
 
                 exp_pre, exp_math, exp_ans_final = split_rpn(expected_str)
                 pred_pre, pred_math, pred_ans_final = split_rpn(predicted_str)
@@ -295,13 +293,11 @@ def validate_model(checkpoint_path, test_file_path, output_fail_path, arch=None,
                 # Check absolute truth of final numerical output!
                 if expected_ans_str != predicted_ans_str:
                     # Categorize failure
-                    s1 = m.group(2) if m else " "
-                    s2 = m.group(4) if m else ""
-                    space_key = (len(s1), len(s2))
+                    space_key = (0, 0)
 
-                    is_reversal_skip = not pred_pre or ('+=' not in predicted_str and '-=' not in predicted_str)
-                    is_reversal_fail = not is_reversal_skip and pred_pre != exp_pre
-                    is_math_fail = pred_math != exp_math
+                    is_reversal_skip = "[REV]" not in predicted_str or "[MATH]" not in predicted_str
+                    is_reversal_fail = not is_reversal_skip and pred_pre.strip() != exp_pre.strip()
+                    is_math_fail = pred_math.strip() != exp_math.strip()
                     
                     matched = False
                     if is_reversal_skip:
@@ -315,8 +311,8 @@ def validate_model(checkpoint_path, test_file_path, output_fail_path, arch=None,
                         
                         # Analyze WHICH number failed in the reversal
                         try:
-                            exp_parts = exp_pre.replace('<', '').split()
-                            pred_parts = pred_pre.replace('<', '').split()
+                            exp_parts = exp_pre.strip().split()
+                            pred_parts = pred_pre.strip().split()
                             if len(exp_parts) >= 2 and len(pred_parts) >= 2:
                                 exp_n1_rev, exp_n2_rev = exp_parts[0], exp_parts[1]
                                 pred_n1_rev, pred_n2_rev = pred_parts[0], pred_parts[1]
@@ -484,8 +480,8 @@ def validate_model(checkpoint_path, test_file_path, output_fail_path, arch=None,
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(description="Validate RPN Transformer")
-    parser.add_argument("--model", type=str, default="rpn_llm/models/rope25M_1-22_tens_comp_clean_tiered_32000.pt", help="Path to checkpoint")
-    parser.add_argument("--test_file", type=str, default="rpn_llm/data/RPNData-1-22_tens_comp_clean_tiered_test.txt", help="Path to test file")
+    parser.add_argument("--model", type=str, default="models/rope3.6M_1-22_phase_lean_32000.pt", help="Path to checkpoint")
+    parser.add_argument("--test_file", type=str, default="data/RPNData-1-22_phase_lean_test.txt", help="Path to test file")
     parser.add_argument("--output_file", type=str, default=None, help="Path to output failure file (auto-generated if not provided)")
     parser.add_argument("--arch", type=str, default="rope", choices=["rope", "ut", "rdt"], help="Architecture of the checkpoint (rope, ut, rdt)")
     parser.add_argument("--num_passes", type=int, default=None, help="Force number of universal passes")
@@ -496,6 +492,6 @@ if __name__ == "__main__":
     if args.output_file is None:
         model_basename = os.path.basename(args.model)
         model_name = model_basename.replace(".pt", "")
-        args.output_file = f"rpn_llm/results/{model_name}_failures.txt"
+        args.output_file = f"results/{model_name}_failures.txt"
 
     validate_model(args.model, args.test_file, args.output_file, arch=args.arch, num_passes=args.num_passes, early_stop=args.early_stop)

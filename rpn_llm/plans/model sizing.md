@@ -105,3 +105,28 @@ only_final_ans_failed: 14 (70.0%)
 We wrote a few scripts for mechanistic interpretability:
 - ./test_reversal_failures.py: Tests for failures in the reversal task.
 - ./analyze_layer_attributions.py: Study attribution by layer.
+
+## 4th model (3.6M Parameters) Phased dataset and training- [SUCCESS]
+
+### Dataset: `RPNData-1-22_phase_lean_test.txt`
+We created a new dataset with a phased training approach to improve learning efficiency and performance.
+
+Data is split into 4 phases
+1. Prompt: [BOS] to [REV]
+2. Reversal: [REV] to [MATH]
+3. Math: [MATH] to [ANS]
+4. Answer: [ANS] to [EOS]
+
+Training shows only two phases at a time and masks others so model only learns from previous phase and predicts next.
+
+**Example Format:**
+[BOS]922 560-?[REV]229 065-=[MATH]2-0-0=2:2-6-0=6:9-5-1=3:[BORROW]0|+:263[ANS]362[EOS]
+
+### Results
+Model is more efficient and learns each phase better.
+| Accuracy | Train Steps |
+|----------|-------------|
+| 91.67%   | 8k          |
+| 98.75%   | 32k         |
+|   | 56k         |
+|   | 64k         |

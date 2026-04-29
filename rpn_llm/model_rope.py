@@ -189,24 +189,45 @@ class GPT(nn.Module):
         elif isinstance(module, nn.Embedding):
             torch.nn.init.normal_(module.weight, mean=0.0, std=.02)
         
-    def forward(self, idx: torch.Tensor, targets: torch.Tensor = None, use_cache: bool = False, past_key_values: list = None, return_attention: bool = False, num_passes: int = None, halt_threshold: float = None, halt_on_logit_stability: int = None) -> tuple:
+    def forward(self, idx: torch.Tensor, targets: torch.Tensor = None, use_cache: bool = False, past_key_values: list = None, return_attention: bool = False, num_passes: int = None, halt_threshold: float = None, halt_on_logit_stability: int = None, full_phase_ids: torch.Tensor = None) -> tuple:
         B, T = idx.size()
         
-        # Document Masking: Create a mask that prevents attention from crossing [BOS] (ID 2)
-        # Only relevant during training (T > 1)
+        # Document & Phase Masking
         attn_mask = None
-        if T > 1: #only for training and validation not inference. as there is no padding at inference
-            # seq_ids tracks which "problem" each token belongs to in the stream
-            # [BOS] tokens (id 2) increment the sequence counter
+        if T > 1: 
+            # Training / First step of generation
             is_bos = (idx == 2)
-            seq_ids = is_bos.cumsum(dim=-1) # (B, T)
-            # doc_mask is True only for tokens in the same problem
-            doc_mask = (seq_ids.unsqueeze(1) == seq_ids.unsqueeze(2)) # (B, T, T)
-            # causal_mask is standard lower triangular
+            seq_ids = is_bos.cumsum(dim=-1)
+            doc_mask = (seq_ids.unsqueeze(1) == seq_ids.unsqueeze(2))
+            
+            is_phase_shift = (idx == 10) | (idx == 11) | (idx == 12)
+            global_phase_ids = is_phase_shift.cumsum(dim=-1)
+            
+            phase_diff = (global_phase_ids.unsqueeze(-1) - global_phase_ids.unsqueeze(-2))
             causal_mask = torch.tril(torch.ones(T, T, device=idx.device, dtype=torch.bool))
-            # Combine them
-            full_mask = doc_mask & causal_mask # (B, T, T)
-            attn_mask = full_mask.unsqueeze(1) # (B, 1, T, T) for head broadcasting
+            
+            phase_mask = (phase_diff == 0) | (phase_diff == 1)
+            full_mask = doc_mask & phase_mask & causal_mask # (B, T, T)
+            attn_mask = full_mask.unsqueeze(1) # (B, 1, T, T)
+
+        elif past_key_values is not None and full_phase_ids is not None:
+            # Inference step (T=1) with KV Cache
+            T_total = full_phase_ids.size(1)
+            
+            # We assume current token is the LAST one in full_phase_ids
+            current_phase_ids = full_phase_ids[:, -1:] # (B, 1)
+            past_phase_ids = full_phase_ids[:, :-1]   # (B, T_total-1)
+            
+            # phase_diff for the current query vs all keys (past + current)
+            # (B, 1, T_total)
+            phase_diff = (current_phase_ids.unsqueeze(-1) - full_phase_ids.unsqueeze(-2))
+            
+            # Visibility: diff must be 0 or 1
+            phase_mask = (phase_diff == 0) | (phase_diff == 1) # (B, 1, T_total)
+            
+            # Note: doc_mask is always True for now in validation because we only do 1 doc per batch
+            # and we only attend to past.
+            attn_mask = phase_mask.unsqueeze(1) # (B, 1, 1, T_total)
 
         x = self.transformer.wte(idx)
         
