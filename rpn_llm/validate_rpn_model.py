@@ -38,7 +38,7 @@ def calculate_carries(a_str, b_str, op):
                 carry_val = 0
     return carries
 
-def validate_model(checkpoint_path, test_file_path, output_fail_path, arch=None, num_passes=None, early_stop=None):
+def validate_model(checkpoint_path, test_file_path, output_fail_path, arch=None, num_passes=None, early_stop=None, force_mask=None):
     device = 'cuda' if torch.cuda.is_available() else 'mps' if torch.backends.mps.is_available() else 'cpu'
     print(f"Using device: {device}")
 
@@ -46,6 +46,11 @@ def validate_model(checkpoint_path, test_file_path, output_fail_path, arch=None,
     print(f"Loading checkpoint {checkpoint_path}...")
     checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
     config = checkpoint['config']
+    
+    # Override mask if requested
+    if force_mask is not None:
+        print(f"Overriding use_phase_mask to: {force_mask}")
+        config.use_phase_mask = force_mask
     
     # Auto-detect architecture from config to prevent mismatches
     if hasattr(config, 'n_prelude'):
@@ -490,12 +495,18 @@ if __name__ == "__main__":
     parser.add_argument("--arch", type=str, default="rope", choices=["rope", "ut", "rdt"], help="Architecture of the checkpoint (rope, ut, rdt)")
     parser.add_argument("--num_passes", type=int, default=None, help="Force number of universal passes")
     parser.add_argument("--early_stop", type=int, default=None, help="Stop if logit is stable for N passes")
+    parser.add_argument("--force_mask", type=str, default=None, choices=["True", "False"], help="Force enable/disable phase mask")
     
     args = parser.parse_args()
     
+    fmask = None
+    if args.force_mask == "True": fmask = True
+    elif args.force_mask == "False": fmask = False
+
     if args.output_file is None:
         model_basename = os.path.basename(args.model)
         model_name = model_basename.replace(".pt", "")
-        args.output_file = f"results/{model_name}_failures.txt"
+        fmask_str = f"_fmask_{fmask}" if fmask is not None else ""
+        args.output_file = f"results/{model_name}{fmask_str}_failures.txt"
 
-    validate_model(args.model, args.test_file, args.output_file, arch=args.arch, num_passes=args.num_passes, early_stop=args.early_stop)
+    validate_model(args.model, args.test_file, args.output_file, arch=args.arch, num_passes=args.num_passes, early_stop=args.early_stop, force_mask=fmask)

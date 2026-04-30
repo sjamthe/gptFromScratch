@@ -14,6 +14,7 @@ class GPTConfig:
     n_head: int = 8 # number of attention heads
     n_embd: int = 512 # embedding dimension
     universal: bool = False # if True, all layers share same weights
+    use_phase_mask: bool = True # if True, use sequential phase masking
 
 # --- RoPE Implementation ---
 def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0):
@@ -199,35 +200,29 @@ class GPT(nn.Module):
             is_bos = (idx == 2)
             seq_ids = is_bos.cumsum(dim=-1)
             doc_mask = (seq_ids.unsqueeze(1) == seq_ids.unsqueeze(2))
-            
-            is_phase_shift = (idx == 10) | (idx == 11) | (idx == 12)
-            global_phase_ids = is_phase_shift.cumsum(dim=-1)
-            
-            phase_diff = (global_phase_ids.unsqueeze(-1) - global_phase_ids.unsqueeze(-2))
             causal_mask = torch.tril(torch.ones(T, T, device=idx.device, dtype=torch.bool))
             
-            phase_mask = (phase_diff == 0) | (phase_diff == 1)
-            full_mask = doc_mask & phase_mask & causal_mask # (B, T, T)
+            if self.config.use_phase_mask:
+                is_phase_shift = (idx == 10) | (idx == 11) | (idx == 12)
+                global_phase_ids = is_phase_shift.cumsum(dim=-1)
+                phase_diff = (global_phase_ids.unsqueeze(-1) - global_phase_ids.unsqueeze(-2))
+                phase_mask = (phase_diff == 0) | (phase_diff == 1)
+                full_mask = doc_mask & phase_mask & causal_mask
+            else:
+                full_mask = doc_mask & causal_mask
+
             attn_mask = full_mask.unsqueeze(1) # (B, 1, T, T)
 
-        elif past_key_values is not None and full_phase_ids is not None:
+        elif past_key_values is not None:
             # Inference step (T=1) with KV Cache
-            T_total = full_phase_ids.size(1)
-            
-            # We assume current token is the LAST one in full_phase_ids
-            current_phase_ids = full_phase_ids[:, -1:] # (B, 1)
-            past_phase_ids = full_phase_ids[:, :-1]   # (B, T_total-1)
-            
-            # phase_diff for the current query vs all keys (past + current)
-            # (B, 1, T_total)
-            phase_diff = (current_phase_ids.unsqueeze(-1) - full_phase_ids.unsqueeze(-2))
-            
-            # Visibility: diff must be 0 or 1
-            phase_mask = (phase_diff == 0) | (phase_diff == 1) # (B, 1, T_total)
-            
-            # Note: doc_mask is always True for now in validation because we only do 1 doc per batch
-            # and we only attend to past.
-            attn_mask = phase_mask.unsqueeze(1) # (B, 1, 1, T_total)
+            if self.config.use_phase_mask and full_phase_ids is not None:
+                current_phase_ids = full_phase_ids[:, -1:] # (B, 1)
+                phase_diff = (current_phase_ids.unsqueeze(-1) - full_phase_ids.unsqueeze(-2))
+                phase_mask = (phase_diff == 0) | (phase_diff == 1) # (B, 1, T_total)
+                attn_mask = phase_mask.unsqueeze(1) # (B, 1, 1, T_total)
+            else:
+                # Standard causal inference (no additional mask needed beyond is_causal=True)
+                attn_mask = None
 
         x = self.transformer.wte(idx)
         

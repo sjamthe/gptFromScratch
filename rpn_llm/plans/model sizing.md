@@ -138,3 +138,16 @@ reversal_failed     : 9 (21.4%)
 math_failed         : 36 (85.7%)
 only_final_ans_failed: 6 (14.3%)
 </pre>
+
+### Training model with mask on and off and testing validation with mask on & off.
+
+| Train | Validate | Accuracy |
+|-------|----------|----------|
+| mask off | mask off | 97.29% |
+| mask off | mask on | 85.77% |
+| mask on | mask on | 99.44% |
+| mask on | mask off |  4.43% |
+
+#### Summary
+Model trained with blinders (phase Mask) does well when tested on same phase mask true, but when you test with no phase mask it gets too much information that it has never seen so it fails.  
+On the contrary model trained with no phase mask does almost well when tested with no phase mask (expected), but when you test with phase mask true it still does ok, that means it is tried to work with correct logic, but sometimes was cheating by relying on data that was hidden on phase mask.

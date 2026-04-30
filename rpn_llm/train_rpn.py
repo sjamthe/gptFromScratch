@@ -177,7 +177,7 @@ def run_generation_validation(model, val_loader, device, step, num_batches=4):
     model.train()
     return gen_accuracy_pct
 
-def train_rpn_llm(start_step=0, checkpoint_path=None, model_type="rdt", max_steps=80000, dataset_prefix="1-22_tens_comp_clean_tiered"):
+def train_rpn_llm(start_step=0, checkpoint_path=None, model_type="rdt", max_steps=80000, dataset_prefix="1-22_tens_comp_clean_tiered", use_phase_mask=True):
     device = 'cuda' if torch.cuda.is_available() else 'mps' if torch.backends.mps.is_available() else 'cpu'
     print(f"Using device: {device}")
 
@@ -208,16 +208,16 @@ def train_rpn_llm(start_step=0, checkpoint_path=None, model_type="rdt", max_step
         from model_rdt import GPT, GPTConfig
         n_prelude, n_coda, n_layer = 1, 1, 6
         n_head, n_embd = 8, 512
-        config = GPTConfig(vocab_size=64, n_prelude=n_prelude, n_coda=n_coda, n_layer=n_layer, n_head=n_head, n_embd=n_embd, block_size=2048)
+        config = GPTConfig(vocab_size=64, n_prelude=n_prelude, n_coda=n_coda, n_layer=n_layer, n_head=n_head, n_embd=n_embd, block_size=2048, use_phase_mask=use_phase_mask)
     elif model_type == "ut":
         from model_rope import GPT, GPTConfig
         n_layer, n_head, n_embd = 8, 8, 512
-        config = GPTConfig(vocab_size=64, n_layer=n_layer, n_head=n_head, n_embd=n_embd, block_size=2048, universal=True)
+        config = GPTConfig(vocab_size=64, n_layer=n_layer, n_head=n_head, n_embd=n_embd, block_size=2048, universal=True, use_phase_mask=use_phase_mask)
     elif model_type == "rope":
         from model_rope import GPT, GPTConfig
         # Stage: The "Wide" Lite Model to test Reversal Capacity
         n_layer, n_head, n_embd = 2, 6, 384
-        config = GPTConfig(vocab_size=64, n_layer=n_layer, n_head=n_head, n_embd=n_embd, block_size=512, universal=False)
+        config = GPTConfig(vocab_size=64, n_layer=n_layer, n_head=n_head, n_embd=n_embd, block_size=512, universal=False, use_phase_mask=use_phase_mask)
 
     model = GPT(config)
     model.to(device)
@@ -225,7 +225,7 @@ def train_rpn_llm(start_step=0, checkpoint_path=None, model_type="rdt", max_step
     # Calculate parameter count dynamically
     num_params = sum(p.numel() for p in model.parameters())
     param_str = f"{num_params/1e6:.1f}M"
-    model_prefix = f"{model_type}{param_str}"
+    model_prefix = f"{model_type}{param_str}_phaseMask_{use_phase_mask}"
     
     run_name = f"{model_prefix}_{dataset_prefix}"
 
@@ -360,7 +360,9 @@ if __name__ == "__main__":
     parser.add_argument("--model", type=str, default="rope", choices=["rope", "ut", "rdt"], help="Model architecture to train")
     parser.add_argument("--max_steps", type=int, default=64000, help="Total steps to train for (default 80000)")
     parser.add_argument("--dataset", type=str, default="1-22_uniform_BOS", help="Dataset prefix")
+    parser.add_argument("--no_phase_mask", action="store_false", dest="use_phase_mask", help="Disable sequential phase masking")
+    parser.set_defaults(use_phase_mask=True)
     
     args = parser.parse_args()
         
-    train_rpn_llm(args.start_step, args.checkpoint_path, args.model, args.max_steps, args.dataset)
+    train_rpn_llm(args.start_step, args.checkpoint_path, args.model, args.max_steps, args.dataset, args.use_phase_mask)
