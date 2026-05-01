@@ -143,9 +143,21 @@ def validate_model(checkpoint_path, test_file_path, output_fail_path, arch=None,
     fail_tokens_count = 0
     fail_tokens_correct = 0
 
-    # Ensure output file is freshly clean before append looping!
+    # Setup output paths
+    if "_failures.txt" in output_fail_path:
+        summary_path = output_fail_path.replace("_failures.txt", "_summary.txt")
+    else:
+        summary_path = output_fail_path + "_summary.txt"
+        
+    print(f"Logging failures to: {output_fail_path}")
+    print(f"Logging summary to: {summary_path}")
+
+    # Ensure output files are freshly clean before looping!
     with open(output_fail_path, "w", encoding="utf-8") as f:
-        f.write("--- Real-time Validation Failures ---\n\n")
+        f.write(f"--- Real-time Validation Failures - Model: {checkpoint_path} ---\n\n")
+    
+    with open(summary_path, "w", encoding="utf-8") as f:
+        f.write(f"--- Validation Summary - Model: {checkpoint_path} ---\n\n")
 
     max_rows = int(VALIDATION_SET_RATIO*total_items/len(length_groups))
     print(f"Beginning batched evaluation on {max_rows} rows per group...")
@@ -391,7 +403,8 @@ def validate_model(checkpoint_path, test_file_path, output_fail_path, arch=None,
     print(f"Global Token Accuracy: {final_token_acc:.2f}%")
     print(f"Failure Token Accuracy: {final_fail_token_acc:.2f}%")
     
-    with open(output_fail_path, "a", encoding="utf-8") as f:
+    # Write to Summary File
+    with open(summary_path, "a", encoding="utf-8") as f:
         f.write(f"\nValidation Accuracy: {accuracy:.2f}% ({total_correct}/{total_processed})\n")
         f.write("=========================================\n\n")
 
@@ -413,10 +426,10 @@ def validate_model(checkpoint_path, test_file_path, output_fail_path, arch=None,
         acc = (cor / tot) * 100 if tot > 0 else 0
         stats = f"{c:<8}| {tot:<8}| {cor:<8}| {fls:<8}| {acc:.2f}%"
         print(stats)
-        with open(output_fail_path, "a", encoding="utf-8") as f:
+        with open(summary_path, "a", encoding="utf-8") as f:
             f.write(stats + "\n")
             
-    with open(output_fail_path, "a", encoding="utf-8") as f:
+    with open(summary_path, "a", encoding="utf-8") as f:
         f.write("\n--- Edge Case Analysis ---\n")
         f.write(f"{'Category':<16} | {'Total':<8} | {'Correct':<8} | Accuracy\n")
         for cat, stats in edge_stats.items():
@@ -460,7 +473,7 @@ def validate_model(checkpoint_path, test_file_path, output_fail_path, arch=None,
             pct = (count / total_digit_fails * 100) if total_digit_fails > 0 else 0
             print(f"{length:2d} digits: {count} failures ({pct:.1f}%)")
 
-    with open(output_fail_path, "a", encoding="utf-8") as f:
+    with open(summary_path, "a", encoding="utf-8") as f:
         f.write("\n--- Failure Category Breakdown ---\n")
         for cat, count in failure_categories.items():
             pct = (count / total_fails * 100) if total_fails > 0 else 0

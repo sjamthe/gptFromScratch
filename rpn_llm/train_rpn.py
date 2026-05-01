@@ -211,7 +211,7 @@ def train_rpn_llm(start_step=0, checkpoint_path=None, model_type="rdt", max_step
         config = GPTConfig(vocab_size=64, n_prelude=n_prelude, n_coda=n_coda, n_layer=n_layer, n_head=n_head, n_embd=n_embd, block_size=2048, use_phase_mask=use_phase_mask)
     elif model_type == "ut":
         from model_rope import GPT, GPTConfig
-        n_layer, n_head, n_embd = 8, 8, 512
+        n_layer, n_head, n_embd = 2, 6, 384
         config = GPTConfig(vocab_size=64, n_layer=n_layer, n_head=n_head, n_embd=n_embd, block_size=2048, universal=True, use_phase_mask=use_phase_mask)
     elif model_type == "rope":
         from model_rope import GPT, GPTConfig
