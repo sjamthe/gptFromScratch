@@ -216,7 +216,7 @@ def train_rpn_llm(start_step=0, checkpoint_path=None, model_type="rdt", max_step
     elif model_type == "rope":
         from model_rope import GPT, GPTConfig
         # Stage: The "Wide" Lite Model to test Reversal Capacity
-        n_layer, n_head, n_embd = 2, 6, 384
+        n_layer, n_head, n_embd = 3, 4, 256
         config = GPTConfig(vocab_size=64, n_layer=n_layer, n_head=n_head, n_embd=n_embd, block_size=512, universal=False, use_phase_mask=use_phase_mask)
 
     model = GPT(config)
@@ -253,6 +253,7 @@ def train_rpn_llm(start_step=0, checkpoint_path=None, model_type="rdt", max_step
         project="rpn-llm",
         name=f"{run_name}",
         config={
+            "use_phase_mask": use_phase_mask,
             "total_batch_size": total_batch_size,
             "B": B,
             "T": T,
