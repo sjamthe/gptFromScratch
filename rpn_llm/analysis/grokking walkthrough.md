@@ -10,7 +10,21 @@ Using the new `grokking_trajectory.py` tool, we tracked the cosine similarity of
   - **Steps 8k - 40k**: Norms increased from **6.6 to 7.06**, indicating the model was "investing" in specific features.
   - **Steps 40k - 344k**: Norms steadily **decreased from 7.06 down to 6.28**. This is a hallmark of "Structural Grokking" where the model simplifies its internal representation to a more efficient logical solution.
 
-## 2. Behavioral Fidelity (Logic vs. Memory)
+## 2. Weight Instability: The Stability Dips
+By tracking the **Consecutive Similarity** (how much the weights change between steps), we identified the exact moment of maximum reorganization for each layer.
+
+| Layer Name | Dip Step | Min Similarity | Insight |
+| :--- | :--- | :--- | :--- |
+| **transformer.h.attn.c_attn** | 16,000 | 0.9794 | **The Pointers Breakout** |
+| **transformer.h.mlp.c_fc** | 16,000 | 0.9724 | **Logic Rewiring** |
+| **transformer.h.attn.c_proj** | 16,000 | 0.9524 | **Circuit Reorganization** |
+| **transformer.wte.weight** | 16,000 | 0.9856 | Vocabulary Shift |
+| **pass_emb** | 16,000 | 0.9939 | Coordinate Adjustment |
+
+### The "Synchronized Big Bang" (Step 16,000):
+Every layer in the model experienced its **maximum rate of change at Step 16,000**. This identifies the exact moment the model "broke" from its memorization path to adopt the new logical program. The `attn.c_proj` layer underwent the most significant transformation, indicating a complete overhaul of how attention head data is integrated into the model's state.
+
+## 3. Behavioral Fidelity (Logic vs. Memory)
 We ran the "Gaslighting" diagnostic on the first 10 checkpoints.
 
 - **Result**: The model consistently scored **98% - 100% Fidelity** from step 8,000 onwards.
