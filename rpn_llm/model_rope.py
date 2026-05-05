@@ -16,6 +16,7 @@ class GPTConfig:
     universal: bool = False # if True, all layers share same weights
     use_phase_mask: bool = True # if True, use sequential phase masking
     mlp_ratio: int = 4 # expansion factor for MLP hidden layer
+    use_gated_residual: bool = False # if True, use data-dependent gating for residuals
 
 # --- RoPE Implementation ---
 def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0):
@@ -149,11 +150,30 @@ class Block(nn.Module):
         self.attn = CausalSelfAttention(config)
         self.ln_2 = nn.LayerNorm(config.n_embd)
         self.mlp = MLP(config)
+        self.use_gated_residual = getattr(config, 'use_gated_residual', False)
+        if self.use_gated_residual:
+            self.attn_gate_proj = nn.Linear(config.n_embd, config.n_embd)
+            self.mlp_gate_proj = nn.Linear(config.n_embd, config.n_embd)
     
     def forward(self, x: torch.Tensor, freqs_cis: torch.Tensor, use_cache: bool = False, cache_state: tuple = None, return_attention: bool = False, attn_mask: torch.Tensor = None, head_mask: torch.Tensor = None) -> tuple:
-        attn_out, cache_out, weights = self.attn(self.ln_1(x), freqs_cis, use_cache=use_cache, cache_state=cache_state, return_attention=return_attention, attn_mask=attn_mask, head_mask=head_mask)
-        x = x + attn_out
-        x = x + self.mlp(self.ln_2(x))
+        norm_x_attn = self.ln_1(x)
+        attn_out, cache_out, weights = self.attn(norm_x_attn, freqs_cis, use_cache=use_cache, cache_state=cache_state, return_attention=return_attention, attn_mask=attn_mask, head_mask=head_mask)
+        
+        if getattr(self, 'use_gated_residual', False):
+            attn_gate = torch.sigmoid(self.attn_gate_proj(norm_x_attn))
+            x = x + attn_gate * attn_out
+        else:
+            x = x + attn_out
+            
+        norm_x_mlp = self.ln_2(x)
+        mlp_out = self.mlp(norm_x_mlp)
+        
+        if getattr(self, 'use_gated_residual', False):
+            mlp_gate = torch.sigmoid(self.mlp_gate_proj(norm_x_mlp))
+            x = x + mlp_gate * mlp_out
+        else:
+            x = x + mlp_out
+            
         return x, cache_out, weights
 
 class GPT(nn.Module):
