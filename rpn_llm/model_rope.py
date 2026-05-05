@@ -15,6 +15,7 @@ class GPTConfig:
     n_embd: int = 512 # embedding dimension
     universal: bool = False # if True, all layers share same weights
     use_phase_mask: bool = True # if True, use sequential phase masking
+    mlp_ratio: int = 4 # expansion factor for MLP hidden layer
 
 # --- RoPE Implementation ---
 def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0):
@@ -125,9 +126,9 @@ class CausalSelfAttention(nn.Module):
 class MLP(nn.Module):
     def __init__(self, config: GPTConfig):
         super().__init__()
-        self.c_fc = nn.Linear(config.n_embd, 4 * config.n_embd)
+        self.c_fc = nn.Linear(config.n_embd, config.mlp_ratio * config.n_embd)
         self.gelu = nn.GELU(approximate='tanh')
-        self.c_proj = nn.Linear(4 * config.n_embd, config.n_embd)
+        self.c_proj = nn.Linear(config.mlp_ratio * config.n_embd, config.n_embd)
     
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.c_fc(x)

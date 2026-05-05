@@ -177,7 +177,7 @@ def run_generation_validation(model, val_loader, device, step, num_batches=4):
     model.train()
     return gen_accuracy_pct
 
-def train_rpn_llm(start_step=0, checkpoint_path=None, model_type="rdt", max_steps=80000, dataset_prefix="1-22_tens_comp_clean_tiered", use_phase_mask=True):
+def train_rpn_llm(start_step, checkpoint_path, model_type, max_steps, dataset_prefix, use_phase_mask, mlp_ratio=4):
     device = 'cuda' if torch.cuda.is_available() else 'mps' if torch.backends.mps.is_available() else 'cpu'
     print(f"Using device: {device}")
 
@@ -204,28 +204,45 @@ def train_rpn_llm(start_step=0, checkpoint_path=None, model_type="rdt", max_step
 
     torch.set_float32_matmul_precision('high')
     
+    # Load model classes based on type
     if model_type == "rdt":
         from model_rdt import GPT, GPTConfig
-        n_prelude, n_coda, n_layer = 1, 1, 6
-        n_head, n_embd = 8, 512
-        config = GPTConfig(vocab_size=64, n_prelude=n_prelude, n_coda=n_coda, n_layer=n_layer, n_head=n_head, n_embd=n_embd, block_size=2048, use_phase_mask=use_phase_mask)
-    elif model_type == "ut":
+    else:
         from model_rope import GPT, GPTConfig
-        n_layer, n_head, n_embd = 2, 6, 384
-        config = GPTConfig(vocab_size=64, n_layer=n_layer, n_head=n_head, n_embd=n_embd, block_size=2048, universal=True, use_phase_mask=use_phase_mask)
-    elif model_type == "rope":
-        from model_rope import GPT, GPTConfig
-        # Stage: The "Wide" Lite Model to test Reversal Capacity
-        n_layer, n_head, n_embd = 3, 4, 256
-        config = GPTConfig(vocab_size=64, n_layer=n_layer, n_head=n_head, n_embd=n_embd, block_size=512, universal=False, use_phase_mask=use_phase_mask)
+
+    checkpoint = None
+    config_in_checkpoint = False
+    if checkpoint_path is not None:
+        print(f"Loading checkpoint from {checkpoint_path}...")
+        checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
+        if 'config' in checkpoint:
+            print("Loading config from checkpoint...")
+            config = checkpoint['config']
+            config_in_checkpoint = True
+    
+    if not config_in_checkpoint:
+        if model_type == "rdt":
+            config = GPTConfig(vocab_size=64, n_prelude=1, n_coda=1, n_layer=6, n_head=8, n_embd=512, block_size=2048)
+        elif model_type == "ut":
+            config = GPTConfig(vocab_size=64, n_layer=2, n_head=8, n_embd=128, block_size=2048, universal=True, use_phase_mask=use_phase_mask, mlp_ratio=mlp_ratio)
+        elif model_type == "rope":
+            config = GPTConfig(vocab_size=64, n_layer=3, n_head=4, n_embd=256, block_size=512, universal=False, use_phase_mask=use_phase_mask, mlp_ratio=mlp_ratio)
 
     model = GPT(config)
     model.to(device)
     
+    # Extract structural params from config for logging (works for both rope and rdt)
+    n_layer = config.n_layer
+    n_head = config.n_head
+    n_embd = config.n_embd
+    # use mlp_ratio and use_phase_mask from config if available, otherwise from args
+    cur_mlp_ratio = getattr(config, 'mlp_ratio', mlp_ratio)
+    cur_use_phase_mask = getattr(config, 'use_phase_mask', use_phase_mask)
+
     # Calculate parameter count dynamically
     num_params = sum(p.numel() for p in model.parameters())
     param_str = f"{num_params/1e6:.1f}M"
-    model_prefix = f"{model_type}{param_str}_phaseMask_{use_phase_mask}"
+    model_prefix = f"{model_type}{param_str}_{n_layer}l_{n_head}h_{n_embd}e_mlp{cur_mlp_ratio}_phaseMask_{cur_use_phase_mask}"
     
     run_name = f"{model_prefix}_{dataset_prefix}"
 
@@ -249,35 +266,33 @@ def train_rpn_llm(start_step=0, checkpoint_path=None, model_type="rdt", max_step
         coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio))
         return min_lr + (max_lr - min_lr) * coeff
     
+    # Combine training config with model config for wandb
+    import dataclasses
+    wandb_config = {
+        "model_type": model_type,
+        "dataset": dataset_prefix,
+        "total_batch_size": total_batch_size,
+        "B": B,
+        "T": T,
+        "grad_accum_steps": grad_accum_steps,
+        "max_lr": max_lr,
+        "min_lr": min_lr,
+        "warmup_steps": warmup_steps,
+        "max_steps": max_steps,
+        "num_params_M": sum(p.numel() for p in model.parameters()) / 1e6,
+    }
+    # Automatically add everything from GPTConfig!
+    wandb_config.update(dataclasses.asdict(config))
+
     wandb.init(
         project="rpn-llm",
         name=f"{run_name}",
-        config={
-            "use_phase_mask": use_phase_mask,
-            "total_batch_size": total_batch_size,
-            "B": B,
-            "T": T,
-            "grad_accum_steps": grad_accum_steps,
-            "max_lr": max_lr,
-            "min_lr": min_lr,
-            "warmup_steps": warmup_steps,
-            "max_steps": max_steps,
-            "train_dataset": train_dataset,
-            "val_dataset": val_dataset,
-            "n_layer": n_layer,
-            "n_head": n_head,
-            "n_embd": n_embd,
-            "model_type": model_type,
-            "model_params": sum(p.numel() for p in model.parameters()) / 1e6,
-            "train_dataset": train_dataset,
-        }
+        config=wandb_config
     )
 
     optimizer = model.configure_optimizers(weight_decay=0.1, learning_rate=max_lr, device=device)
     
-    if checkpoint_path is not None:
-        print(f"Loading checkpoint from {checkpoint_path}...")
-        checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
+    if checkpoint is not None:
         model.load_state_dict(checkpoint['model'])
         optimizer.load_state_dict(checkpoint['optimizer'])
         # advance dataloader to the precise step analytically
@@ -362,8 +377,9 @@ if __name__ == "__main__":
     parser.add_argument("--max_steps", type=int, default=64000, help="Total steps to train for (default 80000)")
     parser.add_argument("--dataset", type=str, default="1-22_uniform_BOS", help="Dataset prefix")
     parser.add_argument("--no_phase_mask", action="store_false", dest="use_phase_mask", help="Disable sequential phase masking")
+    parser.add_argument("--mlp_ratio", type=int, default=4, help="MLP expansion ratio (default 4)")
     parser.set_defaults(use_phase_mask=True)
     
     args = parser.parse_args()
         
-    train_rpn_llm(args.start_step, args.checkpoint_path, args.model, args.max_steps, args.dataset, args.use_phase_mask)
+    train_rpn_llm(args.start_step, args.checkpoint_path, args.model, args.max_steps, args.dataset, args.use_phase_mask, args.mlp_ratio)

@@ -14,13 +14,13 @@ Try to create smallest model that achieves 99% accuracy on the test set.
  ### Transformer Weights (7,123,200 Total)
  - **Vocab Embeddings (wte)**: `64 × 384 = 24,576`
  - **Block (Per Layer)**: `1,774,464`
-   - Attention (QKV): `384 × 1152 + bias = 443,520`
-   - Attention (Proj): `384 × 384 + bias = 147,840`
-   - MLP (FC): `384 × 1536 + bias = 591,360`
-   - MLP (Proj): `1536 × 384 + bias = 590,208`
-   - LayerNorms: `768 + 768 = 1,536`
+   - Attention (QKV): `384 × (384*3) + bias(384*3) = 443,520`
+   - Attention (Proj): `384 × 384 + bias(384) = 147,840`
+   - MLP (FC): `384 × (384*4) + bias(384*4) = 591,360`
+   - MLP (Proj): `(384*4) × 384 + bias(384) = 590,208`
+   - LayerNorms: `(384*2) + (384*2) = 1,536`
  - **Total Layers (4)**: `1,774,464 × 4 = 7,097,856`
- - **Final LayerNorm**: `768`
+ - **Final LayerNorm**: `(384*2) = 768`
 
  ### Results:
  - 99.74% accuracy at 48k steps
