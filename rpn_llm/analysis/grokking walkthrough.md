@@ -74,5 +74,55 @@ While the model masters short problems almost immediately, the complex logic req
 3. **The Peak Commitment (40k)**: At step 40,000, the model reaches its highest fidelity and its **peak weight norms**. It has fully committed to the logical solution.
 4. **Structural Compression (40k+)**: After this peak, the model maintains near-perfect fidelity while the weight norms decay. The model is essentially "optimizing its code" for the logic it has now mastered.
 
+## 6. The Residual Stream Journey (Token Transformation)
+To understand how information flows, we tracked each token's vector state (the residual stream `x`) through every layer of the Universal Transformer. We plotted two metrics for every token:
+1. **Solid Line**: Similarity to its starting state (1.0 = unchanged, 0.0 = completely transformed).
+2. **Dotted Line**: `1 - Similarity to final state` (Starts high, ends at 0.0).
+
+By comparing the memorization phase (Step 8k) to the mastery phase (Step 344k), we can literally see the logic being built.
+
+### Token Position Reference
+For the visualized prompt `[BOS]123 456+? [REV]321 654+=`, here is the position map:
+
+| T0 | T1 | T2 | T3 | T4 | T5 | T6 | T7 | T8 | T9 | T10 | T11 | T12 | T13 | T14 | T15 | T16 | T17 | T18 | T19 | T20 |
+|:--:|:--:|:--:|:--:|:--:|:--:|:--:|:--:|:--:|:--:|:--:|:--:|:--:|:--:|:--:|:--:|:--:|:--:|:--:|:--:|:--:|
+| `[BOS]` | `1` | `2` | `3` | `_` | `4` | `5` | `6` | `+` | `?` | `_` | `[REV]` | `3` | `2` | `1` | `_` | `6` | `5` | `4` | `+` | `=` |
+| `_` *(344k)* | `_` | `[ANS]` | `[ANS]` | `2` | `+` | `+` | `+` | `=` | `[REV]` | `4` | `0` | `5` | `4` | `4` | `6` | `5` | `4` | `+` | `=` | `[MATH]` |
+| `=` *(8k)* | `=` | `=` | `=` | `3` | `2` | `2` | `1` | `=` | `[REV]` | `4` | `6` | `6` | `5` | `5` | `6` | `+` | `+` | `+` | `=` | `[MATH]` |
+
+*(Note: `_` represents the space character)*
+
+### Step 8,000 (Memorization)
+![Residual Journey 8k](residual_journey_8000.png)
+*At 8k, the tokens undergo transformation, but it is less structured. The dotted lines (convergence to final state) and solid lines (divergence from start) cross in a "messier" pattern, indicating the model hasn't established clear roles for specific tokens.*
+
+### Step 344,000 (Mastery)
+![Residual Journey 344k](residual_journey_344000.png)
+*At 344k, the token roles are sharply defined. The solid lines for the critical tokens (like `T20: '='` and the reversed digits `T12-T18`) plummet, showing intense "growth spurts" where they import logic from other tokens. The prompt tokens (like `T0: '[BOS]'` and `T1-T7`) barely change at all (solid lines stay near 1.0).*
+
+## 7. The Residual Stream Journey: Unit Addition Phase
+Because the tokens prior to `[MATH]` are merely context (the model reading the prompt), the true cognitive effort happens *after* `[MATH]`, when the model must perform the step-by-step unit addition: `[MATH]3+6+0=9`.
+
+We passed this exact string into the model and tracked the residual stream specifically for the active generation tokens: `T20:[MATH]`, `T21:3`, `T22:+`, `T23:6`, `T24:+`, `T25:0`, `T26:=`, and `T27:9`.
+
+### Token Position Reference (Generation Phase)
+Here is what the models actually predicted at each position during this generation sequence:
+
+| Position | T20 | T21 | T22 | T23 | T24 | T25 | T26 | T27 |
+|:--|:--:|:--:|:--:|:--:|:--:|:--:|:--:|:--:|
+| **Input Token** | `[MATH]` | `3` | `+` | `6` | `+` | `0` | `=` | `9` |
+| **344k Prediction** | `3` | `+` | `6` | `+` | `0` | `=` | `9` | `:` |
+| **8k Prediction** | `3` | `+` | `6` | `+` | `0` | `=` | `9` | `:` |
+
+**A Profound Discovery**: The 8k model and the 344k model predict the *exact same correct tokens*. Yet, as the charts below show, their internal processes couldn't be more different. This is the essence of grokking!
+
+### Step 8,000 (Memorization Phase)
+![Generation Journey 8k](generation_journey_8000.png)
+*At 8k, every single generation token is violently fluctuating throughout the entire depth of the network. The model is guessing wildly at every step.*
+
+### Step 344,000 (Mastery Phase)
+![Generation Journey 344k](generation_journey_344000.png)
+*At 344k, the picture is incredibly clear. Notice how the calculation operators (`+`, `=`) have much smoother, higher-similarity trajectories. They are structural. But look at the digit tokens (`3`, `6`, and the final answer `9`). Their vectors plummet drastically (solid line down to ~0.3). They are acting as highly active variables, importing the math logic from the MLP to calculate the sum.*
+
 ## Tools Created
-- [grokking_trajectory.py](file:///Users/sjamthe/Documents/GithubRepos/gptFromScratch/rpn_llm/analysis/grokking_trajectory.py): A generic tool for future analysis of any training run.
+- [grokking_trajectory.py](grokking_trajectory.py): A generic tool for future analysis of any training run.

@@ -43,13 +43,13 @@ sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
 from model_rope import GPT, GPTConfig
 from utils import RPNTokenizer
 
-def generate_until_math_done(model, idx, tokenizer, max_new_tokens=1024):
+def generate_until_math_done(model, idx, tokenizer, max_new_tokens=1024, head_mask=None):
     """Generates until the scratchpad is finished (reaches [ANS] or [EOS])"""
     ans_token = tokenizer.vocab.get("[ANS]", -1)
     eos_token = tokenizer.vocab.get("[EOS]", -1)
     
     for _ in range(max_new_tokens):
-        logits, _ = model(idx)
+        logits, _ = model(idx, head_mask=head_mask)
         logits = logits[:, -1, :]
         probs = F.softmax(logits, dim=-1)
         next_token = torch.argmax(probs, dim=-1, keepdim=True)
@@ -59,13 +59,15 @@ def generate_until_math_done(model, idx, tokenizer, max_new_tokens=1024):
             break
     return idx
 
-def run_fidelity_test(model_path, test_samples, device='cpu', verbose=True):
-    if verbose:
-        print(f"\nTesting Model: {os.path.basename(model_path)}")
-    
-    checkpoint = torch.load(model_path, map_location=device, weights_only=False)
-    model = GPT(checkpoint['config'])
-    model.load_state_dict(checkpoint['model'])
+def run_fidelity_test(model_path_or_obj, test_samples, device='cpu', verbose=True, head_mask=None):
+    if isinstance(model_path_or_obj, str):
+        if verbose:
+            print(f"\nTesting Model: {os.path.basename(model_path_or_obj)}")
+        checkpoint = torch.load(model_path_or_obj, map_location=device, weights_only=False)
+        model = GPT(checkpoint['config'])
+        model.load_state_dict(checkpoint['model'])
+    else:
+        model = model_path_or_obj
     model.to(device)
     model.eval()
     
@@ -77,7 +79,7 @@ def run_fidelity_test(model_path, test_samples, device='cpu', verbose=True):
     for prompt in test_samples:
         # 1. Generate normal scratchpad first to find the stop point
         idx = torch.tensor(tokenizer.encode(prompt), dtype=torch.long).unsqueeze(0).to(device)
-        full_gen = generate_until_math_done(model, idx, tokenizer)
+        full_gen = generate_until_math_done(model, idx, tokenizer, head_mask=head_mask)
         scratchpad = tokenizer.decode(full_gen[0].tolist())
         
         # 2. Find all digits after '=' in the scratchpad
@@ -101,7 +103,7 @@ def run_fidelity_test(model_path, test_samples, device='cpu', verbose=True):
         ans_token = tokenizer.vocab.get("[ANS]", -1)
         final_out = idx_hack
         for _ in range(50):
-            logits, _ = model(final_out)
+            logits, _ = model(final_out, head_mask=head_mask)
             logits = logits[:, -1, :]
             next_token = torch.argmax(logits, dim=-1, keepdim=True)
             final_out = torch.cat((final_out, next_token), dim=1)
