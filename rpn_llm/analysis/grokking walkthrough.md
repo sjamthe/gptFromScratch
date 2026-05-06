@@ -124,5 +124,20 @@ Here is what the models actually predicted at each position during this generati
 ![Generation Journey 344k](generation_journey_344000.png)
 *At 344k, the picture is incredibly clear. Notice how the calculation operators (`+`, `=`) have much smoother, higher-similarity trajectories. They are structural. But look at the digit tokens (`3`, `6`, and the final answer `9`). Their vectors plummet drastically (solid line down to ~0.3). They are acting as highly active variables, importing the math logic from the MLP to calculate the sum.*
 
+## 8. The Mechanics of Gated Memory
+To solve the "overloaded residual stream" problem, we trained a modified architecture that introduces **Data-Dependent Gated Residuals**. Instead of blindly adding attention and MLP outputs to the residual stream (`x = x + out`), the model learns to dynamically control an "openness" gate between `0.0` (clamped shut) and `1.0` (wide open) for *every token* at *every pass*.
+
+If our theory holds, the model should learn **Dynamic Halting**: it should close the gates for syntax tokens (protecting their memory) while keeping them open for variable tokens (allowing computation).
+
+We plotted the mean gate values for the unit-addition tokens (`[MATH]3+6+0=9`) across all 22 layers:
+
+### Step 8,000 (Gated Model)
+![Gate Activations 8k](gate_activations_8000.png)
+*At 8k, the gates are mostly undifferentiated. The model hasn't learned distinct token roles yet.*
+
+### Step 80,000 (Gated Model)
+![Gate Activations 80k](gate_activations_80000.png)
+*At 80k, the "Dynamic Halting" behavior emerges brilliantly! Look at the Attention Gate for the `=` token in Pass 21—it drops to **0.25**. The model is physically clamping its gate shut to protect the memory of the `=` token from being overwritten. Meanwhile, the `+` gates stay highly open (~0.65), and the variable digits (`3`, `6`) actively modulate their gates layer-by-layer to perform the math.*
+
 ## Tools Created
 - [grokking_trajectory.py](grokking_trajectory.py): A generic tool for future analysis of any training run.

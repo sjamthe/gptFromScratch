@@ -171,7 +171,7 @@ if __name__ == "__main__":
     print(f"Loaded {len(short_prompts)} short and {len(long_prompts)} long trials from benchmark.")
     
     models_to_test = [
-        "rpn_llm/models/ut0.4M_2l_6h_192e_mlp3_phaseMask_True_1-22_phase_lean_344000.pt",
+        "rpn_llm/models/ut0.5M_2l_6h_192e_mlp3_phaseMask_True_gated_1-22_phase_lean_80000.pt",
         #"rpn_llm/models/ut0.2M_mlp1_phaseMask_True_1-22_phase_lean_64000.pt",
         #"rpn_llm/models/ut1.8M_phaseMask_True_1-22_phase_lean_48000.pt", # MLP4 (1.8M)
         #"rpn_llm/models/ut1.5M_mlp3_phaseMask_True_1-22_phase_lean_56000.pt", # MLP3 (1.5M)

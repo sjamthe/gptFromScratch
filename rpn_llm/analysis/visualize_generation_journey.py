@@ -47,18 +47,30 @@ def get_residual_journey(model, prompt, tokenizer, device):
         x = x + model.pass_emb[emb_idx].view(1, 1, -1)
         
         # Attention
+        norm_x_attn = model.transformer.h.ln_1(x)
         attn_out, _, _ = model.transformer.h.attn(
-            model.transformer.h.ln_1(x), 
+            norm_x_attn, 
             model.freqs_cis, 
             attn_mask=attn_mask
         )
-        x = x + attn_out
+        if getattr(model.transformer.h, 'use_gated_residual', False):
+            attn_gate = torch.sigmoid(model.transformer.h.attn_gate_proj(norm_x_attn))
+            x = x + attn_gate * attn_out
+        else:
+            x = x + attn_out
+            
         states.append(x.detach().clone())
         state_names.append(f"P{i}_Attn")
         
         # MLP
-        mlp_out = model.transformer.h.mlp(model.transformer.h.ln_2(x))
-        x = x + mlp_out
+        norm_x_mlp = model.transformer.h.ln_2(x)
+        mlp_out = model.transformer.h.mlp(norm_x_mlp)
+        if getattr(model.transformer.h, 'use_gated_residual', False):
+            mlp_gate = torch.sigmoid(model.transformer.h.mlp_gate_proj(norm_x_mlp))
+            x = x + mlp_gate * mlp_out
+        else:
+            x = x + mlp_out
+            
         states.append(x.detach().clone())
         state_names.append(f"P{i}_MLP")
         
@@ -66,7 +78,7 @@ def get_residual_journey(model, prompt, tokenizer, device):
 
 def visualize_generation_journey(step):
     device = 'mps' if torch.backends.mps.is_available() else 'cpu'
-    model_path = f"rpn_llm/models/ut0.4M_2l_6h_192e_mlp3_phaseMask_True_1-22_phase_lean_{step}.pt"
+    model_path = f"rpn_llm/models/ut0.5M_2l_6h_192e_mlp3_phaseMask_True_gated_1-22_phase_lean_{step}.pt"
     
     if not os.path.exists(model_path):
         print(f"Skipping {step}, file not found.")
@@ -141,11 +153,11 @@ def visualize_generation_journey(step):
     plt.legend(bbox_to_anchor=(1.04, 1), loc="upper left")
     plt.tight_layout()
     
-    out_path = f"rpn_llm/analysis/generation_journey_{step}.png"
+    out_path = f"rpn_llm/analysis/generation_journey_gated_{step}.png"
     plt.savefig(out_path)
     print(f"Saved {out_path}")
     plt.close()
 
 if __name__ == "__main__":
     visualize_generation_journey(8000)
-    visualize_generation_journey(344000)
+    visualize_generation_journey(80000)
