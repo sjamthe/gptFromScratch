@@ -347,6 +347,9 @@ class GPT(nn.Module):
         if return_attention:
             return logits, loss, all_weights
             
+        if use_cache:
+            return logits, loss, present_key_values
+            
         return logits, loss
     
     def configure_optimizers(self, weight_decay, learning_rate, device):
