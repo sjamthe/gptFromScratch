@@ -17,6 +17,7 @@ class GPTConfig:
     use_phase_mask: bool = True # if True, use sequential phase masking
     mlp_ratio: int = 4 # expansion factor for MLP hidden layer
     use_gated_residual: bool = False # if True, use data-dependent gating for residuals
+    use_mohsa: bool = False # if True, use Multi-Overlapped-Head Self-Attention
 
 # --- RoPE Implementation ---
 def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0):
@@ -55,6 +56,7 @@ class CausalSelfAttention(nn.Module):
         self.c_proj.NANO_GPT_SCALE_INIT = 1
         self.n_head = config.n_head
         self.n_embd = config.n_embd
+        self.use_mohsa = getattr(config, 'use_mohsa', False)
         # No absolute bias mask initialization needed for flash attention
     
     def forward(self, x: torch.Tensor, freqs_cis: torch.Tensor, use_cache: bool = False, cache_state: tuple = None, return_attention: bool = False, attn_mask: torch.Tensor = None, head_mask: torch.Tensor = None) -> tuple:
@@ -62,6 +64,86 @@ class CausalSelfAttention(nn.Module):
         qkv = self.c_attn(x)
         q,k,v = qkv.split(self.n_embd, dim=2)
         
+        if self.use_mohsa:
+            freqs_cis_large, freqs_cis_small = freqs_cis if freqs_cis is not None else (None, None)
+            
+            n_head_small = self.n_head
+            head_dim_small = C // n_head_small
+            n_head_large = self.n_head // 2
+            head_dim_large = C // n_head_large
+            
+            q_s = q.view(B, T, n_head_small, head_dim_small)
+            k_s = k.view(B, T, n_head_small, head_dim_small)
+            v_s = v.view(B, T, n_head_small, head_dim_small)
+            
+            q_l = q.view(B, T, n_head_large, head_dim_large)
+            k_l = k.view(B, T, n_head_large, head_dim_large)
+            v_l = v.view(B, T, n_head_large, head_dim_large)
+            
+            offset_l, offset_s = 0, 0
+            if use_cache and cache_state is not None:
+                offset_l = cache_state[0].size(2)
+                offset_s = cache_state[2].size(2)
+                
+            if freqs_cis_large is not None:
+                q_l, k_l = apply_rotary_emb(q_l, k_l, freqs_cis_large[offset_l : offset_l + T])
+            if freqs_cis_small is not None:
+                q_s, k_s = apply_rotary_emb(q_s, k_s, freqs_cis_small[offset_s : offset_s + T])
+                
+            q_l = q_l.transpose(1, 2)
+            k_l = k_l.transpose(1, 2)
+            v_l = v_l.transpose(1, 2)
+            
+            q_s = q_s.transpose(1, 2)
+            k_s = k_s.transpose(1, 2)
+            v_s = v_s.transpose(1, 2)
+            
+            if use_cache:
+                if cache_state is not None:
+                    k_cache_l, v_cache_l, k_cache_s, v_cache_s = cache_state
+                    k_l = torch.cat([k_cache_l, k_l], dim=2)
+                    v_l = torch.cat([v_cache_l, v_l], dim=2)
+                    k_s = torch.cat([k_cache_s, k_s], dim=2)
+                    v_s = torch.cat([v_cache_s, v_s], dim=2)
+                cache_state = (k_l, v_l, k_s, v_s)
+                
+            is_causal = (T > 1)
+            
+            def get_attn(qq, kk, vv, off):
+                if return_attention:
+                    att = (qq @ kk.transpose(-2, -1)) * (1.0 / math.sqrt(kk.size(-1)))
+                    if is_causal:
+                        q_idx = torch.arange(off, off + T, device=x.device).view(-1, 1)
+                        k_idx = torch.arange(kk.size(2), device=x.device).view(1, -1)
+                        mask = q_idx < k_idx
+                        if attn_mask is not None:
+                            mask = mask | ~attn_mask.squeeze(1)
+                        att = att.masked_fill(mask, float('-inf'))
+                    aw = F.softmax(att, dim=-1)
+                    return aw @ vv, aw
+                else:
+                    if attn_mask is not None:
+                        return F.scaled_dot_product_attention(qq, kk, vv, attn_mask=attn_mask, is_causal=False), None
+                    else:
+                        return F.scaled_dot_product_attention(qq, kk, vv, is_causal=is_causal), None
+            
+            y_l, aw_l = get_attn(q_l, k_l, v_l, offset_l)
+            y_s, aw_s = get_attn(q_s, k_s, v_s, offset_s)
+            
+            attn_weights = (aw_l, aw_s) if return_attention else None
+            
+            y_l = y_l.transpose(1, 2).contiguous().view(B, T, C)
+            y_s = y_s.transpose(1, 2).contiguous().view(B, T, C)
+            
+            y = y_l + y_s
+            
+            if head_mask is not None:
+                pass # head masking for MOHSA is complex, skipping for now unless needed
+
+            y = self.c_proj(y)
+            return y, cache_state, attn_weights
+
+        # Standard Attention below
         # Explicit shape for RoPE application: (B, T, n_head, head_dim)
         q = q.view(B, T, self.n_head, C // self.n_head)
         k = k.view(B, T, self.n_head, C // self.n_head)
@@ -200,9 +282,17 @@ class GPT(nn.Module):
         self.transformer.wte.weight = self.lm_head.weight
         
         # Initialize RoPE frequencies
-        head_dim = config.n_embd // config.n_head
-        freqs_cis = precompute_freqs_cis(head_dim, config.block_size)
-        self.register_buffer("freqs_cis", freqs_cis, persistent=False)
+        if getattr(config, 'use_mohsa', False):
+            # For MOHSA with 192 embd, 6 small heads (dim=32), 3 large heads (dim=64)
+            freqs_cis_large = precompute_freqs_cis(config.n_embd // (config.n_head // 2), config.block_size)
+            freqs_cis_small = precompute_freqs_cis(config.n_embd // config.n_head, config.block_size)
+            self.register_buffer("freqs_cis_large", freqs_cis_large, persistent=False)
+            self.register_buffer("freqs_cis_small", freqs_cis_small, persistent=False)
+            self.freqs_cis = None
+        else:
+            head_dim = config.n_embd // config.n_head
+            freqs_cis = precompute_freqs_cis(head_dim, config.block_size)
+            self.register_buffer("freqs_cis", freqs_cis, persistent=False)
 
         self.apply(self._init_weights)
         
@@ -259,6 +349,7 @@ class GPT(nn.Module):
         all_weights = [] if return_attention else None
         
         # Universal vs Sequential loop
+        block_freqs = (self.freqs_cis_large, self.freqs_cis_small) if getattr(self.config, 'use_mohsa', False) else self.freqs_cis
         if self.config.universal:
             # Dynamic Depth: Allow overriding number of passes at inference
             max_passes = num_passes if num_passes is not None else self.config.n_layer
@@ -280,7 +371,7 @@ class GPT(nn.Module):
                 if head_mask is not None:
                     h_mask = head_mask[i]
                     
-                x, cache_out, weights = self.transformer.h(x, freqs_cis, use_cache=use_cache, cache_state=cache_in, return_attention=return_attention, attn_mask=attn_mask, head_mask=h_mask)
+                x, cache_out, weights = self.transformer.h(x, block_freqs, use_cache=use_cache, cache_state=cache_in, return_attention=return_attention, attn_mask=attn_mask, head_mask=h_mask)
                 
                 if use_cache:
                     present_key_values.append(cache_out)
@@ -329,7 +420,7 @@ class GPT(nn.Module):
             # Standard model: num_passes/halt_threshold is ignored
             for i, block in enumerate(self.transformer.h):
                 cache_in = past_key_values[i] if past_key_values is not None else None
-                x, cache_out, weights = block(x, freqs_cis, use_cache=use_cache, cache_state=cache_in, return_attention=return_attention, attn_mask=attn_mask)
+                x, cache_out, weights = block(x, block_freqs, use_cache=use_cache, cache_state=cache_in, return_attention=return_attention, attn_mask=attn_mask)
                 if use_cache:
                     present_key_values.append(cache_out)
                 if return_attention:

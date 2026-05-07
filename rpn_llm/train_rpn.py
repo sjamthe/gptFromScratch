@@ -177,7 +177,7 @@ def run_generation_validation(model, val_loader, device, step, num_batches=4):
     model.train()
     return gen_accuracy_pct
 
-def train_rpn_llm(start_step=0, checkpoint_path=None, model_type="rope", max_steps=80000, dataset_prefix="1-22_uniform_BOS", use_phase_mask=True, mlp_ratio=4, use_gated_residual=False):
+def train_rpn_llm(start_step=0, checkpoint_path=None, model_type="rope", max_steps=80000, dataset_prefix="1-22_uniform_BOS", use_phase_mask=True, mlp_ratio=4, use_gated_residual=False, use_mohsa=False):
     device = 'cuda' if torch.cuda.is_available() else 'mps' if torch.backends.mps.is_available() else 'cpu'
     print(f"Using device: {device}")
 
@@ -224,9 +224,9 @@ def train_rpn_llm(start_step=0, checkpoint_path=None, model_type="rope", max_ste
         if model_type == "rdt":
             config = GPTConfig(vocab_size=64, n_prelude=1, n_coda=1, n_layer=6, n_head=8, n_embd=512, block_size=2048)
         elif model_type == "ut":
-            config = GPTConfig(vocab_size=64, n_layer=1, n_head=6, n_embd=192, block_size=2048, universal=True, use_phase_mask=use_phase_mask, mlp_ratio=mlp_ratio, use_gated_residual=use_gated_residual)
+            config = GPTConfig(vocab_size=64, n_layer=1, n_head=6, n_embd=192, block_size=2048, universal=True, use_phase_mask=use_phase_mask, mlp_ratio=mlp_ratio, use_gated_residual=use_gated_residual, use_mohsa=use_mohsa)
         elif model_type == "rope":
-            config = GPTConfig(vocab_size=64, n_layer=3, n_head=4, n_embd=256, block_size=512, universal=False, use_phase_mask=use_phase_mask, mlp_ratio=mlp_ratio, use_gated_residual=use_gated_residual)
+            config = GPTConfig(vocab_size=64, n_layer=3, n_head=4, n_embd=256, block_size=512, universal=False, use_phase_mask=use_phase_mask, mlp_ratio=mlp_ratio, use_gated_residual=use_gated_residual, use_mohsa=use_mohsa)
 
     model = GPT(config)
     model.to(device)
@@ -239,6 +239,7 @@ def train_rpn_llm(start_step=0, checkpoint_path=None, model_type="rope", max_ste
     cur_mlp_ratio = getattr(config, 'mlp_ratio', mlp_ratio)
     cur_use_phase_mask = getattr(config, 'use_phase_mask', use_phase_mask)
     cur_use_gated_residual = getattr(config, 'use_gated_residual', use_gated_residual)
+    cur_use_mohsa = getattr(config, 'use_mohsa', use_mohsa)
 
     # Calculate parameter count dynamically
     num_params = sum(p.numel() for p in model.parameters())
@@ -246,6 +247,8 @@ def train_rpn_llm(start_step=0, checkpoint_path=None, model_type="rope", max_ste
     model_prefix = f"{model_type}{param_str}_{n_layer}l_{n_head}h_{n_embd}e_mlp{cur_mlp_ratio}_phaseMask_{cur_use_phase_mask}"
     if cur_use_gated_residual:
         model_prefix += "_gated"
+    if cur_use_mohsa:
+        model_prefix += "_mohsa"
     
     run_name = f"{model_prefix}_{dataset_prefix}"
 
@@ -382,8 +385,9 @@ if __name__ == "__main__":
     parser.add_argument("--no_phase_mask", action="store_false", dest="use_phase_mask", help="Disable sequential phase masking")
     parser.add_argument("--mlp_ratio", type=int, default=4, help="MLP expansion ratio (default 4)")
     parser.add_argument("--use_gated_residual", action="store_true", help="Enable data-dependent gating for residuals")
+    parser.add_argument("--use_mohsa", action="store_true", help="Enable Multi-Overlapped-Head Self-Attention")
     parser.set_defaults(use_phase_mask=True)
     
     args = parser.parse_args()
         
-    train_rpn_llm(args.start_step, args.checkpoint_path, args.model, args.max_steps, args.dataset, args.use_phase_mask, args.mlp_ratio, args.use_gated_residual)
+    train_rpn_llm(args.start_step, args.checkpoint_path, args.model, args.max_steps, args.dataset, args.use_phase_mask, args.mlp_ratio, args.use_gated_residual, args.use_mohsa)

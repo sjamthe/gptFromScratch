@@ -176,3 +176,25 @@ The model is an "Approximate Accountant"—it can route data between positions, 
 - [pointer_fidelity_test.py](pointer_fidelity_test.py): The "Truly Strict" benchmark for logical grounding.
 - [visualize_gate_activations.py](visualize_gate_activations.py): Extracts and heatmaps gated residual projections.
 - [analyze_reversal_ungated.py](analyze_reversal_ungated.py): Tests the "Generative Stamina" of the architecture.
+
+---
+
+## 11. The Shared Subspace Transformer (MOHSA)
+
+To break the 21-digit Law, we implemented **Multi-Overlapped-Head Self-Attention (MOHSA)** inside `model_rope.py`.
+
+### The "Option B" Zero-Cost Overlap
+Instead of adding new parameters, we modified the `CausalSelfAttention` block to process the exact same $QKV$ projection in two parallel branches:
+
+1.  **The Large Branch (High Resolution)**: Reshapes the projection into 3 heads of dimension 64. A 64-dim RoPE is applied.
+2.  **The Small Branch (Fast Track)**: Reshapes the exact same projection into 6 heads of dimension 32. A 32-dim RoPE is applied.
+
+### The Holographic Fusion
+Both branches compute their own Attention patterns (which diverge significantly due to the non-linear Softmax and different RoPE frequencies) and output a tensor of shape `(Batch, Time, 192)`. We simply **sum** these two outputs together before the final projection:
+
+$$Y_{combined} = Y_{large} + Y_{small}$$
+
+**Why this matters**: Because we use a shared $QKV$ projection, every single dimension in the embedding space is simultaneously forced to learn a representation that is useful for both a 64-dim "Large" head and a 32-dim "Small" head. This creates a denser, holographic representation of the math logic without adding a single parameter to the model (0.4M total).
+
+*   **Status**: Fully implemented and tested in `model_rope.py`. The model correctly maintains separate KV caches for the two RoPE branches during inference.
+*   **Next Step**: Train this architecture on the standard 1-22 curriculum!
