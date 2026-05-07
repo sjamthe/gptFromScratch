@@ -57,14 +57,20 @@ class CausalSelfAttention(nn.Module):
         self.n_head = config.n_head
         self.n_embd = config.n_embd
         self.use_mohsa = getattr(config, 'use_mohsa', False)
+        if self.use_mohsa:
+            self.c_attn_large = nn.Linear(config.n_embd, 3 * config.n_embd)
         # No absolute bias mask initialization needed for flash attention
     
     def forward(self, x: torch.Tensor, freqs_cis: torch.Tensor, use_cache: bool = False, cache_state: tuple = None, return_attention: bool = False, attn_mask: torch.Tensor = None, head_mask: torch.Tensor = None) -> tuple:
         B, T, C = x.size()
-        qkv = self.c_attn(x)
-        q,k,v = qkv.split(self.n_embd, dim=2)
         
         if self.use_mohsa:
+            qkv_small = self.c_attn(x)
+            q_s, k_s, v_s = qkv_small.split(self.n_embd, dim=2)
+            
+            qkv_large = self.c_attn_large(x)
+            q_l, k_l, v_l = qkv_large.split(self.n_embd, dim=2)
+            
             freqs_cis_large, freqs_cis_small = freqs_cis if freqs_cis is not None else (None, None)
             
             n_head_small = self.n_head
@@ -72,13 +78,13 @@ class CausalSelfAttention(nn.Module):
             n_head_large = self.n_head // 2
             head_dim_large = C // n_head_large
             
-            q_s = q.view(B, T, n_head_small, head_dim_small)
-            k_s = k.view(B, T, n_head_small, head_dim_small)
-            v_s = v.view(B, T, n_head_small, head_dim_small)
+            q_s = q_s.view(B, T, n_head_small, head_dim_small)
+            k_s = k_s.view(B, T, n_head_small, head_dim_small)
+            v_s = v_s.view(B, T, n_head_small, head_dim_small)
             
-            q_l = q.view(B, T, n_head_large, head_dim_large)
-            k_l = k.view(B, T, n_head_large, head_dim_large)
-            v_l = v.view(B, T, n_head_large, head_dim_large)
+            q_l = q_l.view(B, T, n_head_large, head_dim_large)
+            k_l = k_l.view(B, T, n_head_large, head_dim_large)
+            v_l = v_l.view(B, T, n_head_large, head_dim_large)
             
             offset_l, offset_s = 0, 0
             if use_cache and cache_state is not None:
@@ -144,6 +150,9 @@ class CausalSelfAttention(nn.Module):
             return y, cache_state, attn_weights
 
         # Standard Attention below
+        qkv = self.c_attn(x)
+        q,k,v = qkv.split(self.n_embd, dim=2)
+        
         # Explicit shape for RoPE application: (B, T, n_head, head_dim)
         q = q.view(B, T, self.n_head, C // self.n_head)
         k = k.view(B, T, self.n_head, C // self.n_head)

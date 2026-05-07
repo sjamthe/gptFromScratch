@@ -6,12 +6,12 @@ This document defines the performance "ceilings" of the current 2-layer, 6-head 
 
 Current champions of the 0.4M - 0.5M parameter class.
 
-| Metric | Ungated (344k) | **Ungated (400k Final)** | Gated (200k) | **Gated (400k Final)** |
-|:---|:---|:---|:---|:---|
-| **Short Fidelity (4-dig)** | 100.0% | **100.0%** | 96.0% | 96.0% |
-| **Long Fidelity (25-dig)** | 76.0% | **72.0%** | 4.0% | 2.0% |
-| **22-Digit Reversal** | 30.0% | **65.0%** | 50.0% | 50.0% |
-| **Heuristic Fallback** | 0 | 0 | 0 | 0 |
+| Metric | Ungated (344k) | **Ungated (400k Final)** | **MOHSA (400k)** | Gated (200k) | Gated (400k Final) |
+|:---|:---|:---|:---|:---|:---|
+| **Short Fidelity (4-dig)** | 100.0% | **100.0%** | 98.0% | 96.0% | 96.0% |
+| **Long Fidelity (25-dig)** | 76.0% | **72.0%** | 46.0% | 4.0% | 2.0% |
+| **22-Digit Reversal** | 30.0% | **65.0%** | 55.0% | 50.0% | 50.0% |
+| **Heuristic Fallback** | 0 | 0 | 0 | 0 | 0 |
 
 ## 2. Circuit Efficiency (Head Recruitment)
 
@@ -70,3 +70,13 @@ To break these limits, we are considering the following architectural upgrades:
 2.  **RoPE Tuning**: Adjusting the base or frequency of the Rotary Positional Embeddings to prevent "blurring" after 40 tokens.
 3.  **Curriculum Randomized Padding**: Training with variable start-offsets to force the model to learn **position-invariant** reversal.
 4.  **Wait for 400k**: Seeing if the Gated model naturally overcomes these stamina issues if given double the training time.
+
+## MOHSA Analysis
+1. Short Fidelity (4-dig): 98.0% (This perfectly mirrors your 98% validation accuracy. The model slightly under-fit the basic arithmetic compared to the 100% baseline).
+2. Long Fidelity (25-dig): 46.0%. This is fascinating. It is drastically worse than the baseline Ungated model (72.0%), but it is massively better than the Gated model (2.0%).
+3. 22-Digit Reversal (Stamina): 55.0%. It actually beat the Gated model (50.0%) but fell short of the pure Ungated model (65.0%).
+4. Asymmetric Capacity (N1=21, N2=4): 85.0%. (Ungated was 100%, Gated was 85%).
+#### The Diagnosis
+The MOHSA architecture ended up being a "Compromise Model." By forcing the 64-dim heads and 32-dim heads to share the exact same embedding space, we essentially created a tug-of-war for the gradients. The "Large" heads wanted to track long-range Carry Bits, while the "Small" heads wanted to track localized Syntax.
+
+Because they were fighting over the exact same 192 dimensions without any new parameters to absorb the conflict, the model slightly under-fit the training data (dropping to 98% validation and 46% long fidelity). However, the "holographic redundancy" did give it a slight stamina boost over the Gated model.
