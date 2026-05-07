@@ -139,5 +139,40 @@ We plotted the mean gate values for the unit-addition tokens (`[MATH]3+6+0=9`) a
 ![Gate Activations 80k](gate_activations_80000.png)
 *At 80k, the "Dynamic Halting" behavior emerges brilliantly! Look at the Attention Gate for the `=` token in Pass 21—it drops to **0.25**. The model is physically clamping its gate shut to protect the memory of the `=` token from being overwritten. Meanwhile, the `+` gates stay highly open (~0.65), and the variable digits (`3`, `6`) actively modulate their gates layer-by-layer to perform the math.*
 
-## Tools Created
+### Gated Circuit Ablation (Step 80,000)
+To see how the logic is distributed, we ran the fidelity ablation test on the 6 attention heads of the 80k Gated model. The baseline fidelity on long problems was **26.0%**.
+
+- **Head 0**: 0.0% (Drop: 26.0%) -> **CRITICAL**
+- **Head 1**: 1.5% (Drop: 24.6%) -> **CRITICAL**
+- **Head 4**: 0.8% (Drop: 25.2%) -> **CRITICAL**
+- **Head 3**: 36.0% (Drop: **-10.0%**) -> **NOISY**
+- **Head 5**: 40.3% (Drop: **-14.3%**) -> **NOISY**
+
+This reveals an incredible insight about the state of the model mid-grokking. The model has built its core arithmetic logic circuit strictly inside **Heads 0, 1, and 4**. However, because it is only at 80k steps, **Heads 3 and 5** are acting as noisy "distractors". When we physically disabled Head 5, the model's accuracy immediately jumped from 26% to 40%!
+
+## 9. The Architectural Boundary: The 21-Digit Law
+
+Through a series of asymmetric stress tests, we identified the absolute "Spectral Boundary" of this 2-layer, 6-head Universal Transformer architecture. We discovered that the model's failure on long problems is not due to math inability, but a **Generative Stamina** bottleneck.
+
+### Reversal Capacity Breakdown
+The model is an "Approximate Accountant"—it can route data between positions, but it loses precision when generating long consecutive strings of digits.
+
+| Number 1 Len | Number 2 Len | Total Prompt (Tokens) | Reversal Accuracy | Discovery |
+|:---|:---|:---|:---|:---|
+| 4 digits | 4 digits | 12 tokens | **100%** | Perfect algorithmic logic. |
+| 16 digits | 16 digits | 36 tokens | **96%** | The limit of stable "long" math. |
+| **21 digits** | 4 digits | 29 tokens | **100%** | **The Absolute Ceiling.** |
+| **22 digits** | 4 digits | 30 tokens | **30%** | **Generative Stamina Failure.** |
+| 25 digits | 25 digits | 54 tokens | **0%** | Catastrophic collapse (OOD). |
+
+### Key Insights:
+1. **The 21-Digit Law**: The model's internal "counter" is stable for exactly **21 consecutive digits**. At the 22nd digit, the internal positional state drifts just enough to "skip" a token, causing the scratchpad to be one digit too short.
+2. **Vision vs. Speech**: The model's "Vision" is excellent—it can see the 2nd number perfectly even when pushed to token index 30+. However, its "Speech" (generation) is limited by its 2-layer depth. It simply cannot maintain the precise recurrence required for 22+ digits.
+3. **The Fidelity Mirage**: Our earlier high fidelity scores (76%) on long problems were only possible because the test script **manually fixed** the model's "dyslexic" scratchpad. In the real world, the model fails long math because it cannot write its own scratchpad correctly.
+
+## Tools and Documents Created
+- [boundary_limits.md](boundary_limits.md): The official leaderboard and frontier map for architectural capacity.
 - [grokking_trajectory.py](grokking_trajectory.py): A generic tool for future analysis of any training run.
+- [pointer_fidelity_test.py](pointer_fidelity_test.py): The "Truly Strict" benchmark for logical grounding.
+- [visualize_gate_activations.py](visualize_gate_activations.py): Extracts and heatmaps gated residual projections.
+- [analyze_reversal_ungated.py](analyze_reversal_ungated.py): Tests the "Generative Stamina" of the architecture.

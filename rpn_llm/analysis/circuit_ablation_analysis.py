@@ -65,7 +65,7 @@ def analyze_ablation(model_path, benchmark_type="long", device='mps'):
     plt.legend()
     plt.grid(axis='y', alpha=0.3)
     
-    out_name = f"rpn_llm/analysis/circuit_ablation_{benchmark_type}.png"
+    out_name = f"rpn_llm/analysis/circuit_ablation_gated_{benchmark_type}.png"
     plt.savefig(out_name)
     print(f"\nPlot saved to {out_name}")
     
@@ -75,11 +75,11 @@ def analyze_ablation(model_path, benchmark_type="long", device='mps'):
         "head_scores": head_scores,
         "n_head": n_head
     }
-    data_out = f"rpn_llm/analysis/circuit_ablation_{benchmark_type}.json"
+    data_out = f"rpn_llm/analysis/circuit_ablation_gated_{benchmark_type}.json"
     with open(data_out, "w") as f:
         json.dump(results, f)
     print(f"Results saved to {data_out}")
 
 if __name__ == "__main__":
-    path = "rpn_llm/models/ut0.4M_2l_6h_192e_mlp3_phaseMask_True_1-22_phase_lean_344000.pt"
+    path = "rpn_llm/models/ut0.5M_2l_6h_192e_mlp3_phaseMask_True_gated_1-22_phase_lean_80000.pt"
     analyze_ablation(path, benchmark_type="long")

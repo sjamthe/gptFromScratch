@@ -224,7 +224,7 @@ def train_rpn_llm(start_step=0, checkpoint_path=None, model_type="rope", max_ste
         if model_type == "rdt":
             config = GPTConfig(vocab_size=64, n_prelude=1, n_coda=1, n_layer=6, n_head=8, n_embd=512, block_size=2048)
         elif model_type == "ut":
-            config = GPTConfig(vocab_size=64, n_layer=2, n_head=6, n_embd=192, block_size=2048, universal=True, use_phase_mask=use_phase_mask, mlp_ratio=mlp_ratio, use_gated_residual=use_gated_residual)
+            config = GPTConfig(vocab_size=64, n_layer=1, n_head=6, n_embd=192, block_size=2048, universal=True, use_phase_mask=use_phase_mask, mlp_ratio=mlp_ratio, use_gated_residual=use_gated_residual)
         elif model_type == "rope":
             config = GPTConfig(vocab_size=64, n_layer=3, n_head=4, n_embd=256, block_size=512, universal=False, use_phase_mask=use_phase_mask, mlp_ratio=mlp_ratio, use_gated_residual=use_gated_residual)
 

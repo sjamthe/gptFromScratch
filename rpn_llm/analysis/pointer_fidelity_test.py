@@ -76,6 +76,12 @@ def run_fidelity_test(model_path_or_obj, test_samples, device='cpu', verbose=Tru
     followed_count = 0
     total_trials = 0
     
+    # Error Categories
+    cat_perfect = 0
+    cat_heuristic = 0
+    cat_syntax = 0
+    cat_partial = 0
+    
     for prompt in test_samples:
         # 1. Generate normal scratchpad first to find the stop point
         idx = torch.tensor(tokenizer.encode(prompt), dtype=torch.long).unsqueeze(0).to(device)
@@ -116,21 +122,44 @@ def run_fidelity_test(model_path_or_obj, test_samples, device='cpu', verbose=Tru
         if len(ans_indices) > 0:
             ans_pos = ans_indices[0].item()
             completion_up_to_ans = tokenizer.decode(final_out[0, :ans_pos].tolist())
-            harvested_part = completion_up_to_ans.rsplit(":", 1)[1].strip() if ":" in completion_up_to_ans else ""
+            # A valid summary must follow a colon and be purely numeric
+            if ":" in completion_up_to_ans:
+                potential_harvest = completion_up_to_ans.rsplit(":", 1)[1].strip()
+                if potential_harvest.isdigit():
+                    harvested_part = potential_harvest
+                else:
+                    harvested_part = "" # Non-digits (math symbols etc) = Syntax Failure
+            else:
+                harvested_part = ""
         else:
             harvested_part = ""
         
         # 5. Score it
         expected_hacked = "".join(hacked_digits)
-        matches = 0
-        min_len = min(len(expected_hacked), len(harvested_part))
-        for i in range(min_len):
-            if expected_hacked[i] == harvested_part[i]:
-                matches += 1
+        expected_original = "".join(original_digits)
         
-        fidelity_per_trial = (matches / len(expected_hacked)) if len(expected_hacked) > 0 else 0
-        followed_count += fidelity_per_trial
+        matches = 0
+        fidelity_per_trial = 0.0
+        # TRULY STRICT: Only score if length is perfect and it's all digits
+        if harvested_part and len(harvested_part) == len(expected_hacked):
+            min_len = len(expected_hacked)
+            for i in range(min_len):
+                if expected_hacked[i] == harvested_part[i]:
+                    matches += 1
+            fidelity_per_trial = (matches / len(expected_hacked))
+            
         total_trials += 1
+        
+        # Categorize
+        if fidelity_per_trial == 1.0:
+            cat_perfect += 1
+            followed_count += 1.0 # Only 100% perfect trials contribute to the final score
+        elif harvested_part == expected_original and len(harvested_part) > 0:
+            cat_heuristic += 1
+        elif len(harvested_part) != len(expected_hacked):
+            cat_syntax += 1
+        else:
+            cat_partial += 1
         
         if verbose and total_trials % 20 == 0:
             print(f"  Progress: {total_trials}/100, Current Avg: {(followed_count/total_trials)*100:.1f}%")
@@ -141,6 +170,12 @@ def run_fidelity_test(model_path_or_obj, test_samples, device='cpu', verbose=Tru
     avg_fidelity = (followed_count / total_trials) * 100 if total_trials > 0 else 0
     if verbose:
         print(f"Fidelity Score: {avg_fidelity:.1f}% ({followed_count:.1f}/{total_trials})")
+        print("\n--- Error Breakdown ---")
+        print(f"Perfect Fidelity (Trusted Pointers) : {cat_perfect}")
+        print(f"Heuristic Fallback (Trusted Memory) : {cat_heuristic}")
+        print(f"Syntax/Formatting Failure           : {cat_syntax}")
+        print(f"Partial Hallucination               : {cat_partial}")
+        print("-----------------------\n")
     return avg_fidelity
 
 def generate_random_problem(digits):
@@ -171,7 +206,7 @@ if __name__ == "__main__":
     print(f"Loaded {len(short_prompts)} short and {len(long_prompts)} long trials from benchmark.")
     
     models_to_test = [
-        "rpn_llm/models/ut0.5M_2l_6h_192e_mlp3_phaseMask_True_gated_1-22_phase_lean_80000.pt",
+        "rpn_llm/models/ut0.5M_2l_6h_192e_mlp3_phaseMask_True_gated_1-22_phase_lean_160000.pt",
         #"rpn_llm/models/ut0.2M_mlp1_phaseMask_True_1-22_phase_lean_64000.pt",
         #"rpn_llm/models/ut1.8M_phaseMask_True_1-22_phase_lean_48000.pt", # MLP4 (1.8M)
         #"rpn_llm/models/ut1.5M_mlp3_phaseMask_True_1-22_phase_lean_56000.pt", # MLP3 (1.5M)
