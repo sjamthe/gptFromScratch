@@ -50,24 +50,51 @@ def run_teacher_forcing_validation(model, val_loader, device, step):
             # 1. Region-Level Token Accuracies
             valid_mask = (y_val != unk_id) & (y_val != eos_id) & (y_val != pad_id) & (y_val != bos_id) & (y_val != -100)
             
-            math_pos = (y_val == math_id).cumsum(dim=1)
-            ans_pos = (y_val == ans_id).cumsum(dim=1)
-            rev_start_pos = (y_val == rev_id).cumsum(dim=1)
-
-            # REV mask: from [REV] token (inclusive) until [MATH] token (exclusive)
-            # This excludes the prompt tokens before [REV]
-            rev_mask = (rev_start_pos > 0) & (math_pos == 0)
-            math_mask = (math_pos > 0) & (ans_pos == 0)
-            ans_mask = (ans_pos > 0)
+            B, T = y_val.size()
+            valid_rev_mask = torch.zeros_like(y_val, dtype=torch.bool)
+            valid_math_mask = torch.zeros_like(y_val, dtype=torch.bool)
+            valid_ans_mask = torch.zeros_like(y_val, dtype=torch.bool)
             
-            val_rev_correct += ((preds == y_val) & valid_mask & rev_mask).sum().item()
-            val_rev_target += (valid_mask & rev_mask).sum().item()
+            x_cpu = x_val.cpu()
+            y_cpu = y_val.cpu()
             
-            val_math_correct += ((preds == y_val) & valid_mask & math_mask).sum().item()
-            val_math_target += (valid_mask & math_mask).sum().item()
+            for b in range(B):
+                has_bos = False
+                phase = None  # None, 'rev', 'math', 'ans'
+                for t in range(T):
+                    if x_cpu[b, t] == bos_id:
+                        has_bos = True
+                    elif x_cpu[b, t] == eos_id:
+                        has_bos = False
+                        phase = None
+                    
+                    if y_cpu[b, t] == rev_id:
+                        phase = 'rev'
+                    elif y_cpu[b, t] == math_id:
+                        phase = 'math'
+                    elif y_cpu[b, t] == ans_id:
+                        phase = 'ans'
+                        
+                    if has_bos:
+                        if phase == 'rev':
+                            valid_rev_mask[b, t] = True
+                        elif phase == 'math':
+                            valid_math_mask[b, t] = True
+                        elif phase == 'ans':
+                            valid_ans_mask[b, t] = True
             
-            val_ans_correct += ((preds == y_val) & valid_mask & ans_mask).sum().item()
-            val_ans_target += (valid_mask & ans_mask).sum().item()
+            valid_rev_mask = valid_rev_mask.to(device) & valid_mask
+            valid_math_mask = valid_math_mask.to(device) & valid_mask
+            valid_ans_mask = valid_ans_mask.to(device) & valid_mask
+            
+            val_rev_correct += ((preds == y_val) & valid_rev_mask).sum().item()
+            val_rev_target += valid_rev_mask.sum().item()
+            
+            val_math_correct += ((preds == y_val) & valid_math_mask).sum().item()
+            val_math_target += valid_math_mask.sum().item()
+            
+            val_ans_correct += ((preds == y_val) & valid_ans_mask).sum().item()
+            val_ans_target += valid_ans_mask.sum().item()
 
             # 2. Equation-Level Exact Match (Final Answer only)
             preds_cpu = preds.cpu().numpy()
@@ -199,7 +226,7 @@ def run_generation_validation(model, val_loader, device, step, num_batches=4):
     model.train()
     return gen_accuracy_pct
 
-def train_rpn_llm(start_step=0, checkpoint_path=None, model_type="rope", max_steps=80000, dataset_prefix="1-22_uniform_BOS", use_phase_mask=True, mlp_ratio=4, use_gated_residual=False, use_mohsa=False, rope_theta=10000.0, use_recency_bias=False):
+def train_rpn_llm(start_step=0, checkpoint_path=None, model_type="rope", max_steps=80000, dataset_prefix="1-22_uniform_BOS", use_phase_mask=True, mlp_ratio=4, use_gated_residual=False, use_mohsa=False, rope_theta=10000.0, use_recency_bias=False, weight_decay=0.1):
     device = 'cuda' if torch.cuda.is_available() else 'mps' if torch.backends.mps.is_available() else 'cpu'
     print(f"Using device: {device}")
 
@@ -273,6 +300,10 @@ def train_rpn_llm(start_step=0, checkpoint_path=None, model_type="rope", max_ste
         model_prefix += "_mohsa"
     if rope_theta != 10000:
         model_prefix += "_theta"
+    if use_recency_bias:
+        model_prefix += "_rb"
+    if weight_decay != 0.1:
+        model_prefix += f"_wt{weight_decay}"
     
     run_name = f"{model_prefix}_{dataset_prefix}"
 
@@ -320,7 +351,7 @@ def train_rpn_llm(start_step=0, checkpoint_path=None, model_type="rope", max_ste
         config=wandb_config
     )
 
-    optimizer = model.configure_optimizers(weight_decay=0.1, learning_rate=max_lr, device=device)
+    optimizer = model.configure_optimizers(weight_decay=weight_decay, learning_rate=max_lr, device=device)
     
     if checkpoint is not None:
         model.load_state_dict(checkpoint['model'])
@@ -414,8 +445,9 @@ if __name__ == "__main__":
     parser.add_argument("--use_mohsa", action="store_true", help="Enable Multi-Overlapped-Head Self-Attention")
     parser.add_argument("--rope_theta", type=float, default=10000.0, help="Base for RoPE frequencies")
     parser.add_argument("--use_recency_bias", action="store_true", help="Enable relative position bias for recency")
+    parser.add_argument("--weight_decay", type=float, default=0.1, help="Weight decay for AdamW (default 0.1)")
     parser.set_defaults(use_phase_mask=True)
     
     args = parser.parse_args()
         
-    train_rpn_llm(args.start_step, args.checkpoint_path, args.model, args.max_steps, args.dataset, args.use_phase_mask, args.mlp_ratio, args.use_gated_residual, args.use_mohsa, args.rope_theta, args.use_recency_bias)
+    train_rpn_llm(args.start_step, args.checkpoint_path, args.model, args.max_steps, args.dataset, args.use_phase_mask, args.mlp_ratio, args.use_gated_residual, args.use_mohsa, args.rope_theta, args.use_recency_bias, args.weight_decay)
