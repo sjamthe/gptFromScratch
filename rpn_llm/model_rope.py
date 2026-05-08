@@ -18,6 +18,8 @@ class GPTConfig:
     mlp_ratio: int = 4 # expansion factor for MLP hidden layer
     use_gated_residual: bool = False # if True, use data-dependent gating for residuals
     use_mohsa: bool = False # if True, use Multi-Overlapped-Head Self-Attention
+    rope_theta: float = 10000.0 # base for RoPE frequencies
+    use_recency_bias: bool = False # if True, use relative position bias for recency
 
 # --- RoPE Implementation ---
 def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0):
@@ -46,6 +48,16 @@ def apply_rotary_emb(
     xk_out = torch.view_as_real(xk_ * freqs_cis).flatten(3)
     return xq_out.type_as(xq), xk_out.type_as(xk)
 
+class RecencyBias(nn.Module):
+    def __init__(self, max_len=64):
+        super().__init__()
+        self.bias = nn.Parameter(torch.zeros(max_len))
+    
+    def forward(self, T, total_k_len, offset, device):
+        q_idx = torch.arange(offset, offset + T, device=device).unsqueeze(1)
+        k_idx = torch.arange(total_k_len, device=device).unsqueeze(0)
+        dist = (q_idx - k_idx).clamp(0, len(self.bias) - 1)
+        return self.bias[dist]  # [T, T_total]
 
 class CausalSelfAttention(nn.Module):
     def __init__(self, config: GPTConfig):
@@ -59,6 +71,9 @@ class CausalSelfAttention(nn.Module):
         self.use_mohsa = getattr(config, 'use_mohsa', False)
         if self.use_mohsa:
             self.c_attn_large = nn.Linear(config.n_embd, 3 * config.n_embd)
+        self.use_recency_bias = getattr(config, 'use_recency_bias', False)
+        if self.use_recency_bias:
+            self.recency_bias = RecencyBias(max_len=64)
         # No absolute bias mask initialization needed for flash attention
     
     def forward(self, x: torch.Tensor, freqs_cis: torch.Tensor, use_cache: bool = False, cache_state: tuple = None, return_attention: bool = False, attn_mask: torch.Tensor = None, head_mask: torch.Tensor = None) -> tuple:
@@ -116,8 +131,15 @@ class CausalSelfAttention(nn.Module):
             is_causal = (T > 1)
             
             def get_attn(qq, kk, vv, off):
+                if self.use_recency_bias:
+                    rb = self.recency_bias(T, kk.size(2), off, x.device)
+                else:
+                    rb = None
+
                 if return_attention:
                     att = (qq @ kk.transpose(-2, -1)) * (1.0 / math.sqrt(kk.size(-1)))
+                    if rb is not None:
+                        att = att + rb
                     if is_causal:
                         q_idx = torch.arange(off, off + T, device=x.device).view(-1, 1)
                         k_idx = torch.arange(kk.size(2), device=x.device).view(1, -1)
@@ -128,10 +150,27 @@ class CausalSelfAttention(nn.Module):
                     aw = F.softmax(att, dim=-1)
                     return aw @ vv, aw
                 else:
-                    if attn_mask is not None:
-                        return F.scaled_dot_product_attention(qq, kk, vv, attn_mask=attn_mask, is_causal=False), None
+                    if self.use_recency_bias:
+                        # Create float mask
+                        float_mask = torch.zeros(T, kk.size(2), device=x.device)
+                        if is_causal:
+                            q_idx = torch.arange(off, off + T, device=x.device).view(-1, 1)
+                            k_idx = torch.arange(kk.size(2), device=x.device).view(1, -1)
+                            causal_mask = q_idx < k_idx
+                            float_mask = float_mask.masked_fill(causal_mask, float('-inf'))
+                        float_mask = float_mask + rb
+                        
+                        if attn_mask is not None:
+                            if attn_mask.dtype == torch.bool:
+                                float_mask = float_mask.masked_fill(~attn_mask, float('-inf'))
+                            else:
+                                float_mask = float_mask + attn_mask
+                        return F.scaled_dot_product_attention(qq, kk, vv, attn_mask=float_mask, is_causal=False), None
                     else:
-                        return F.scaled_dot_product_attention(qq, kk, vv, is_causal=is_causal), None
+                        if attn_mask is not None:
+                            return F.scaled_dot_product_attention(qq, kk, vv, attn_mask=attn_mask, is_causal=False), None
+                        else:
+                            return F.scaled_dot_product_attention(qq, kk, vv, is_causal=is_causal), None
             
             y_l, aw_l = get_attn(q_l, k_l, v_l, offset_l)
             y_s, aw_s = get_attn(q_s, k_s, v_s, offset_s)
@@ -182,12 +221,19 @@ class CausalSelfAttention(nn.Module):
 
         # Flash attention handles custom causality correctly when queries run dynamically token-by-token
         is_causal = (T > 1) 
+        if self.use_recency_bias:
+            rb = self.recency_bias(T, k.size(2), offset, x.device)
+        else:
+            rb = None
+
         attn_weights = None
         
         if return_attention:
             # Manual attention to capture weights (Flash Attention hides them)
             # (B, nh, T, hs) @ (B, nh, hs, T_total) -> (B, nh, T, T_total)
             att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
+            if rb is not None:
+                att = att + rb
             if is_causal:
                 # Apply causal mask manually
                 # Create mask based on actual sequence indices
@@ -205,11 +251,28 @@ class CausalSelfAttention(nn.Module):
             attn_weights = F.softmax(att, dim=-1)
             y = attn_weights @ v
         else:
-            # If we have a custom mask, we must handle causality within it
-            if attn_mask is not None:
-                y = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask, is_causal=False)
+            if self.use_recency_bias:
+                # Create float mask
+                float_mask = torch.zeros(T, k.size(2), device=x.device)
+                if is_causal:
+                    q_idx = torch.arange(offset, offset + T, device=x.device).view(-1, 1)
+                    k_idx = torch.arange(k.size(2), device=x.device).view(1, -1)
+                    causal_mask = q_idx < k_idx
+                    float_mask = float_mask.masked_fill(causal_mask, float('-inf'))
+                float_mask = float_mask + rb
+                
+                if attn_mask is not None:
+                    if attn_mask.dtype == torch.bool:
+                        float_mask = float_mask.masked_fill(~attn_mask, float('-inf'))
+                    else:
+                        float_mask = float_mask + attn_mask
+                y = F.scaled_dot_product_attention(q, k, v, attn_mask=float_mask, is_causal=False)
             else:
-                y = F.scaled_dot_product_attention(q, k, v, is_causal=is_causal)
+                # If we have a custom mask, we must handle causality within it
+                if attn_mask is not None:
+                    y = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask, is_causal=False)
+                else:
+                    y = F.scaled_dot_product_attention(q, k, v, is_causal=is_causal)
 
         if head_mask is not None:
             # head_mask is (n_head,) or (n_layer, n_head)
@@ -291,16 +354,17 @@ class GPT(nn.Module):
         self.transformer.wte.weight = self.lm_head.weight
         
         # Initialize RoPE frequencies
+        rope_theta = getattr(config, 'rope_theta', 10000.0)
         if getattr(config, 'use_mohsa', False):
             # For MOHSA with 192 embd, 6 small heads (dim=32), 3 large heads (dim=64)
-            freqs_cis_large = precompute_freqs_cis(config.n_embd // (config.n_head // 2), config.block_size)
-            freqs_cis_small = precompute_freqs_cis(config.n_embd // config.n_head, config.block_size)
+            freqs_cis_large = precompute_freqs_cis(config.n_embd // (config.n_head // 2), config.block_size, theta=rope_theta)
+            freqs_cis_small = precompute_freqs_cis(config.n_embd // config.n_head, config.block_size, theta=rope_theta)
             self.register_buffer("freqs_cis_large", freqs_cis_large, persistent=False)
             self.register_buffer("freqs_cis_small", freqs_cis_small, persistent=False)
             self.freqs_cis = None
         else:
             head_dim = config.n_embd // config.n_head
-            freqs_cis = precompute_freqs_cis(head_dim, config.block_size)
+            freqs_cis = precompute_freqs_cis(head_dim, config.block_size, theta=rope_theta)
             self.register_buffer("freqs_cis", freqs_cis, persistent=False)
 
         self.apply(self._init_weights)
