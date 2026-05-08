@@ -11,6 +11,8 @@ from utils import RPNTokenizer, DataLoaderLite
 def run_teacher_forcing_validation(model, val_loader, device, step):
     tokenizer = RPNTokenizer("rpn_llm/rpn-tokenizer.json")
     ans_id = tokenizer.encode("[ANS]")[0]
+    math_id = tokenizer.encode("[MATH]")[0]
+    rev_id = tokenizer.encode("[REV]")[0]
     unk_id = tokenizer.encode("[UNK]")[0]
     eos_id = tokenizer.encode("[EOS]")[0]
     pad_id = tokenizer.encode("[PAD]")[0]
@@ -19,15 +21,16 @@ def run_teacher_forcing_validation(model, val_loader, device, step):
 
     model.eval()
     val_loss_accum = 0.0
-    val_loss_steps = 200
+    val_loss_steps = 50
     
     # Equation-level counters (Final Answer only)
     val_correct_accum = 0
     val_target_accum = 0
     
-    # Global token-level counters (All valid tokens in sequence)
-    val_token_correct_accum = 0
-    val_token_target_accum = 0
+    # Global token-level counters
+    val_rev_correct = 0; val_rev_target = 0
+    val_math_correct = 0; val_math_target = 0
+    val_ans_correct = 0; val_ans_target = 0
 
     with torch.no_grad():
         for _ in range(val_loss_steps):
@@ -44,11 +47,27 @@ def run_teacher_forcing_validation(model, val_loader, device, step):
             # Calculate accuracies
             preds = torch.argmax(logits, dim=-1)
             
-            # 1. Global Token-Level Accuracy
-            # Mask out non-content tokens (UNK, EOS, PAD, BOS) and non-target tokens (-100)
+            # 1. Region-Level Token Accuracies
             valid_mask = (y_val != unk_id) & (y_val != eos_id) & (y_val != pad_id) & (y_val != bos_id) & (y_val != -100)
-            val_token_correct_accum += ((preds == y_val) & valid_mask).sum().item()
-            val_token_target_accum += valid_mask.sum().item()
+            
+            math_pos = (y_val == math_id).cumsum(dim=1)
+            ans_pos = (y_val == ans_id).cumsum(dim=1)
+            rev_start_pos = (y_val == rev_id).cumsum(dim=1)
+
+            # REV mask: from [REV] token (inclusive) until [MATH] token (exclusive)
+            # This excludes the prompt tokens before [REV]
+            rev_mask = (rev_start_pos > 0) & (math_pos == 0)
+            math_mask = (math_pos > 0) & (ans_pos == 0)
+            ans_mask = (ans_pos > 0)
+            
+            val_rev_correct += ((preds == y_val) & valid_mask & rev_mask).sum().item()
+            val_rev_target += (valid_mask & rev_mask).sum().item()
+            
+            val_math_correct += ((preds == y_val) & valid_mask & math_mask).sum().item()
+            val_math_target += (valid_mask & math_mask).sum().item()
+            
+            val_ans_correct += ((preds == y_val) & valid_mask & ans_mask).sum().item()
+            val_ans_target += (valid_mask & ans_mask).sum().item()
 
             # 2. Equation-Level Exact Match (Final Answer only)
             preds_cpu = preds.cpu().numpy()
@@ -85,14 +104,17 @@ def run_teacher_forcing_validation(model, val_loader, device, step):
                         val_correct_accum += 1.0
 
     val_loss_accum /= val_loss_steps
-    val_ans_accuracy_pct = (val_correct_accum / val_target_accum) * 100.0 if val_target_accum > 0 else 0.0
-    val_token_accuracy_pct = (val_token_correct_accum / val_token_target_accum) * 100.0 if val_token_target_accum > 0 else 0.0
+    val_eq_accuracy_pct = (val_correct_accum / val_target_accum) * 100.0 if val_target_accum > 0 else 0.0
+    val_rev_accuracy_pct = (val_rev_correct / val_rev_target) * 100.0 if val_rev_target > 0 else 0.0
+    val_math_accuracy_pct = (val_math_correct / val_math_target) * 100.0 if val_math_target > 0 else 0.0
+    val_ans_accuracy_pct = (val_ans_correct / val_ans_target) * 100.0 if val_ans_target > 0 else 0.0
     val_perplexity = math.exp(val_loss_accum)
     
-    print(f"Step {step+1}, Val Loss: {val_loss_accum:.4f}, Val TF Token Acc: {val_token_accuracy_pct:.2f}%, Val TF Ans Acc: {val_ans_accuracy_pct:.2f}%, Val PPL: {val_perplexity:.4f}")
+    print(f"Step {step+1}, Val Loss: {val_loss_accum:.4f}, Val Eq Acc: {val_eq_accuracy_pct:.2f}%")
+    print(f"  Token Acc -> REV: {val_rev_accuracy_pct:.2f}%, MATH: {val_math_accuracy_pct:.2f}%, ANS: {val_ans_accuracy_pct:.2f}%, PPL: {val_perplexity:.4f}")
     
     model.train()
-    return val_loss_accum, val_perplexity, val_ans_accuracy_pct, val_token_accuracy_pct
+    return val_loss_accum, val_perplexity, val_eq_accuracy_pct, val_rev_accuracy_pct, val_math_accuracy_pct, val_ans_accuracy_pct
 
 def run_generation_validation(model, val_loader, device, step, num_batches=4):
     """
@@ -186,7 +208,7 @@ def train_rpn_llm(start_step=0, checkpoint_path=None, model_type="rope", max_ste
         torch.cuda.manual_seed(1337)
     
     total_batch_size = 8192
-    B = 4
+    B = 16
     T = 512  # Increased to 512 to capture the full context (including \n) for 17-22 digit problems
     assert total_batch_size % (B * T) == 0, "total_batch_size must be divisible by (B * T)"
     grad_accum_steps = total_batch_size // (B * T)
@@ -340,7 +362,7 @@ def train_rpn_llm(start_step=0, checkpoint_path=None, model_type="rope", max_ste
             print(f"Step {step+1}, Loss: {loss_accum.item():.4f}, lr: {lr:.4e}, norm: {norm:.4f}, Time: {dt:.2f}ms, Tokens per second: {tokens_per_sec:.2f}")
 
         if (step+1) % 1000 == 0:
-            val_loss_accum, val_perplexity, val_ans_acc, val_tok_acc = run_teacher_forcing_validation(model, val_loader, device, step)
+            val_loss_accum, val_perplexity, val_eq_acc, val_rev_acc, val_math_acc, val_ans_acc = run_teacher_forcing_validation(model, val_loader, device, step)
        
         if (step+1) % 10 == 0:
             log_dict = {
@@ -353,8 +375,10 @@ def train_rpn_llm(start_step=0, checkpoint_path=None, model_type="rope", max_ste
             if (step+1) % 1000 == 0:
                 log_dict["val_loss"] = val_loss_accum
                 log_dict["val_perplexity"] = val_perplexity
+                log_dict["val_equation_accuracy"] = val_eq_acc
+                log_dict["val_rev_accuracy"] = val_rev_acc
+                log_dict["val_math_accuracy"] = val_math_acc
                 log_dict["val_ans_accuracy"] = val_ans_acc
-                log_dict["val_token_accuracy"] = val_tok_acc
             wandb.log(log_dict, step=step+1)
     
         if (step+1) % 8000 == 0:
