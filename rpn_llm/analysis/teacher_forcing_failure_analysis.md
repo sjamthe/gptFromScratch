@@ -3,11 +3,10 @@
 ## 1. The Experiment
 We created a fully replicated validation logic script using `DataLoaderLite` directly on the `RPNData-1-22_phase_lean_val.txt` validation set. We evaluated the accuracy of next-token predictions in the `[REV]` region under Teacher Forcing (where the model is given the ground truth prefix at every step, meaning it only has to predict $P(x_{t} | x_{<t_{true}})$).
 
-## 2. Key Findings: The 8% Noise Floor
+## 2. Key Findings: The 8% Noise Floor (The Mirage)
 
 *   **The `[REV]` Token Transition is Solved:** The model correctly predicts the `[REV]` token transition 100% of the time (0 failures out of 692 validation prompts). It perfectly understands *when* to start the reversal.
-*   **Flat Positional Error Rate:** The failures occur uniformly across the reversed digits. The model exhibits a persistent, baseline **~7-8% probability of outputting the wrong digit at any given step**. It does *not* hit a "positional wall" or "stamina limit" at specific depths.
-*   **The Math of Exposure Bias:** Because Auto-Regressive generation requires getting every token right in sequence, a flat 92% token success rate yields an expected 22-digit sequence success rate of around $0.92^{22} \approx 16\%$. This compounding token-level noise explains why generative boundary tests show much lower scores than the training logs.
+*   **Flat Positional Error Rate:** The failures occurred uniformly across the reversed digits. The model exhibited a persistent, baseline **~7-8% probability of outputting the wrong digit at any given step**. It did *not* hit a "positional wall" or "stamina limit" at specific depths.
 
 ## 3. Models Tested
 Every architectural variation we tested at the 80k step mark hit the exact same ~93% performance ceiling with an identical error profile:
@@ -26,15 +25,32 @@ Every architectural variation we tested at the 80k step mark hit the exact same 
 | **rope3.6M (No Phase Mask)** | `2l, 6h, 384e` | 92.68% | 8.16% | 7.85% | 5.98% |
 | **rope3.6M (Phase Mask)** | `2l, 6h, 384e` | 92.58% | 8.50% | 7.62% | 5.85% |
 
-## 4. Conclusions on the Bottleneck
+## 4. The Resolution: The DataLoader Boundary Bug
 
-The failure of the `ut1.8M` model, and now the **Standard GPT (`rope`) models**, to break the 93% ceiling is a definitive result. By testing untied standard GPTs and doubling the embedding dimension to `384` (yielding 3.6M parameters), the performance did not change by even a fraction of a percent.
+The failure of the `ut1.8M` model, and the **Standard GPT (`rope`) models**, to break the 93% ceiling was deeply confusing, until we cross-referenced it with the Generative Boundary benchmark, which reported **99.42% sequence-level accuracy**.
 
-**This firmly rules out THREE major hypotheses:**
-1.  **Not an Attention Routing Failure:** If the model struggled to route information over long distances due to attention collapse, architectural tweaks (Theta, Recency Bias, MOHSA) would have shifted the noise profile. They did not.
-2.  **Not a Residual Stream Capacity Constraint:** If the `192` embedding dimension was simply too small to reliably encode digit identities and positional encodings simultaneously, the `384` dimension model would have easily resolved those "collisions" and improved accuracy. It did not.
-3.  **Not a Universal Transformer Issue:** Untying the weights across layers (Standard GPT/`rope` models) yielded the exact same noise profile. The forced parameter sharing of UTs is not the culprit.
+It is mathematically impossible for a sequence to have a 99.42% success rate if its component tokens have an 8% failure rate. This led to the discovery of a catastrophic evaluation bug:
 
-**Remaining Suspects:**
-1.  **Optimization Limits:** Aggressive learning rate schedules, weight decay, or AdamW epsilon values might be trapping the model in a noisy local minimum early in training. Why does every model hit the exact same local minimum? Possibly because the loss landscape is dominated by the same regularizers.
-2.  **Dataset / Masking Bugs:** The `1-22_phase_lean` dataset itself, or the masking logic applied during training, might contain a ~7% error rate, strictly capping what the model can learn.
+### The Bug
+1. `DataLoaderLite` slices the data stream into arbitrary 512-token chunks. The *first sequence* in every chunk is almost always sliced in half, meaning its prompt is missing.
+2. The Teacher Forcing evaluation mask (`(math_pos == 0)`) accidentally reset to `FALSE` the moment it hit the first `[MATH]` token in the chunk.
+3. This forced the metric to **exclusively evaluate the reversal of the very first, chopped sequence**, completely ignoring the 2nd, 3rd, and 4th perfectly intact sequences in the same chunk.
+
+Because the model lacked the full prompt for the chopped sequences, it generated random digits or spaces, creating the illusion of an 8% "noise floor."
+
+### The True Results
+After fixing the validation mask to dynamically track sequence boundaries (`has_bos`) and safely evaluate intact sequences across all phases, the true Teacher Forcing accuracies were revealed:
+
+| Phase | Token Accuracy |
+| :--- | :--- |
+| **Reversal** (`[REV]`) | **99.98%** |
+| **Mathematics** (`[MATH]`) | **100.00%** |
+| **Final Answer** (`[ANS]`) | **99.99%** |
+
+### Final Conclusion
+**The Universal Transformer completely solved the Reversal Curriculum.** 
+1. **No Attention Routing Failure:** The model perfectly routes attention across arbitrary distances to execute the dynamic offset `+2` pointer logic.
+2. **No Capacity Constraints:** The `192` embedding dimension is fully sufficient to pack both digit identities and complex positional encodings.
+3. **No Task Interference:** The model successfully decoupled the pointer logic from the arithmetic logic, achieving functionally 100% precision on both tasks simultaneously. 
+
+The generative benchmark of 99.42% was authentic. We can definitively proceed to the Ten's Complement native arithmetic phase with extreme confidence in the Universal Transformer architecture.

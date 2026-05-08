@@ -13,7 +13,7 @@ from circuit_ablation_analysis import analyze_ablation
 
 device = 'mps' if torch.backends.mps.is_available() else 'cpu'
 tokenizer = RPNTokenizer("rpn_llm/rpn-tokenizer.json")
-model_path = "rpn_llm/models/ut0.4M_2l_6h_192e_mlp3_phaseMask_True_1-22_phase_lean_400000.pt"
+model_path = "rpn_llm/models/ut0.5M_2l_6h_192e_mlp4_phaseMask_True_1-22_rev_only_40000.pt"
 
 checkpoint = torch.load(model_path, map_location=device, weights_only=False)
 model = GPT(checkpoint['config']).to(device)
