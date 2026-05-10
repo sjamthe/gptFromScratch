@@ -20,6 +20,8 @@ class GPTConfig:
     use_mohsa: bool = False # if True, use Multi-Overlapped-Head Self-Attention
     rope_theta: float = 10000.0 # base for RoPE frequencies
     use_recency_bias: bool = False # if True, use relative position bias for recency
+    bos_token_id: int = 2
+    phase_token_ids: list = None
 
 # --- RoPE Implementation ---
 def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0):
@@ -387,13 +389,19 @@ class GPT(nn.Module):
         attn_mask = None
         if T > 1: 
             # Training / First step of generation
-            is_bos = (idx == 2)
+            is_bos = (idx == self.config.bos_token_id)
             seq_ids = is_bos.cumsum(dim=-1)
             doc_mask = (seq_ids.unsqueeze(1) == seq_ids.unsqueeze(2))
             causal_mask = torch.tril(torch.ones(T, T, device=idx.device, dtype=torch.bool))
             
             if self.config.use_phase_mask:
-                is_phase_shift = (idx == 10) | (idx == 11) | (idx == 12)
+                if self.config.phase_token_ids is not None:
+                    phase_tensor = torch.tensor(self.config.phase_token_ids, device=idx.device)
+                    is_phase_shift = torch.isin(idx, phase_tensor)
+                else:
+                    # Fallback to hardcoded defaults if not provided
+                    is_phase_shift = (idx == 10) | (idx == 11) | (idx == 12)
+                    
                 global_phase_ids = is_phase_shift.cumsum(dim=-1)
                 phase_diff = (global_phase_ids.unsqueeze(-1) - global_phase_ids.unsqueeze(-2))
                 phase_mask = (phase_diff == 0) | (phase_diff == 1)

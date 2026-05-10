@@ -274,13 +274,22 @@ def train_rpn_llm(start_step=0, checkpoint_path=None, model_type="rope", max_ste
             config = checkpoint['config']
             config_in_checkpoint = True
     
+    # Get token IDs from tokenizer for phase masking
+    tokenizer = RPNTokenizer(os.path.join(script_dir, "rpn-tokenizer.json"))
+    bos_id = tokenizer.encode("[BOS]")[0]
+    phase_token_ids = [
+        tokenizer.encode("[REV]")[0],
+        tokenizer.encode("[MATH]")[0],
+        tokenizer.encode("[ANS]")[0]
+    ]
+    
     if not config_in_checkpoint:
         if model_type == "rdt":
             config = GPTConfig(vocab_size=64, n_prelude=1, n_coda=1, n_layer=6, n_head=8, n_embd=512, block_size=2048)
         elif model_type == "ut":
-            config = GPTConfig(vocab_size=64, n_layer=3, n_head=8, n_embd=256, block_size=2048, universal=True, use_phase_mask=use_phase_mask, mlp_ratio=mlp_ratio, use_gated_residual=use_gated_residual, use_mohsa=use_mohsa, rope_theta=rope_theta, use_recency_bias=use_recency_bias)
+            config = GPTConfig(vocab_size=64, n_layer=3, n_head=8, n_embd=256, block_size=2048, universal=True, use_phase_mask=use_phase_mask, mlp_ratio=mlp_ratio, use_gated_residual=use_gated_residual, use_mohsa=use_mohsa, rope_theta=rope_theta, use_recency_bias=use_recency_bias, bos_token_id=bos_id, phase_token_ids=phase_token_ids)
         elif model_type == "rope":
-            config = GPTConfig(vocab_size=64, n_layer=2, n_head=6, n_embd=192, block_size=2048, universal=False, use_phase_mask=use_phase_mask, mlp_ratio=mlp_ratio, use_gated_residual=use_gated_residual, use_mohsa=use_mohsa)
+            config = GPTConfig(vocab_size=64, n_layer=2, n_head=6, n_embd=192, block_size=2048, universal=False, use_phase_mask=use_phase_mask, mlp_ratio=mlp_ratio, use_gated_residual=use_gated_residual, use_mohsa=use_mohsa, bos_token_id=bos_id, phase_token_ids=phase_token_ids)
 
     model = GPT(config)
     model.to(device)

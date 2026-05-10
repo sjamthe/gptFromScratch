@@ -6,7 +6,7 @@ import time
 from collections import defaultdict
 from utils import RPNTokenizer, DataLoaderLite
 
-VALIDATION_SET_RATIO = 0.05
+VALIDATION_SET_RATIO = 0.10
 
 def calculate_carries(a_str, b_str, op):
     a, b = int(a_str), int(b_str)
@@ -118,6 +118,7 @@ def validate_model(checkpoint_path, test_file_path, output_fail_path, arch=None,
     edge_stats = {
         'zero_operand': {'total': 0, 'correct': 0},
         'negative_result': {'total': 0, 'correct': 0},
+        'neg_intermediate': {'total': 0, 'correct': 0},
         'normal': {'total': 0, 'correct': 0}
     }
     
@@ -171,6 +172,7 @@ def validate_model(checkpoint_path, test_file_path, output_fail_path, arch=None,
     max_rows = int(VALIDATION_SET_RATIO*total_items/len(length_groups))
     print(f"Beginning batched evaluation on {max_rows} rows per group...")
     accuracy_by_length = {}
+    processed_by_length = {}
     group_idx = 1
     for length, items in length_groups.items():
         print(f"\n--- Evaluating group {group_idx}/{len(length_groups)} (prompt length {length}) - {len(items)} items ---")
@@ -268,7 +270,8 @@ def validate_model(checkpoint_path, test_file_path, output_fail_path, arch=None,
                 total_length = len(prompt_str) + len(expected_str)
                 
                 # New regex to handle [BOS] and ? (handles 2 and 3 numbers)
-                m = re.search(r"(\d+)\s+(\d+)([+\-])(?:(\d+)([+\-]))?\?", prompt_str)
+                # Added \s* before the 3rd number group to handle optional space!
+                m = re.search(r"(\d+)\s+(\d+)([+\-])\s*(?:(\d+)([+\-]))?\?", prompt_str)
                 
                 # Identify if it's a 3-number problem
                 is_3_num = m.group(4) is not None if m else False
@@ -307,11 +310,13 @@ def validate_model(checkpoint_path, test_file_path, output_fail_path, arch=None,
                     except ValueError: pass
                 
                 is_neg = expected_ans_str.startswith('-')
-                is_normal = not is_zero and not is_neg
+                is_neg_intermed = "[REV]-" in expected_str
+                is_normal = not is_zero and not is_neg and not is_neg_intermed
                 
                 total_by_carry[carries] += 1
                 if is_zero: edge_stats['zero_operand']['total'] += 1
                 if is_neg: edge_stats['negative_result']['total'] += 1
+                if is_neg_intermed: edge_stats['neg_intermediate']['total'] += 1
                 if is_normal: edge_stats['normal']['total'] += 1
 
                 # Helper to split RPN parts for Phase format
@@ -324,15 +329,18 @@ def validate_model(checkpoint_path, test_file_path, output_fail_path, arch=None,
                         ans = ""
                         content = s
                     
-                    rev_math = content.split("[REV]")
-                    if len(rev_math) < 2:
+                    # Split by the first [MATH] to separate reversal from math steps
+                    math_parts = content.split("[MATH]", 1)
+                    if len(math_parts) < 2:
                         return "", "", ans
                     
-                    rev_math_content = rev_math[1]
-                    math_parts = rev_math_content.split("[MATH]", 1) # Split only at first [MATH]
+                    # Everything before first [MATH] contains the prompt and reversal
+                    pre_math = math_parts[0]
+                    rev_parts = pre_math.split("[REV]")
+                    rev = rev_parts[1] if len(rev_parts) > 1 else ""
                     
-                    rev = math_parts[0] if len(math_parts) > 0 else ""
-                    math = math_parts[1] if len(math_parts) > 1 else ""
+                    # Everything after first [MATH] is the math trace!
+                    math = math_parts[1]
                     
                     return rev, math, ans
 
@@ -463,6 +471,7 @@ def validate_model(checkpoint_path, test_file_path, output_fail_path, arch=None,
                     correct_by_carry[carries] += 1
                     if is_zero: edge_stats['zero_operand']['correct'] += 1
                     if is_neg: edge_stats['negative_result']['correct'] += 1
+                    if is_neg_intermed: edge_stats['neg_intermediate']['correct'] += 1
                     if is_normal: edge_stats['normal']['correct'] += 1
 
                     # Update type stats
@@ -472,8 +481,9 @@ def validate_model(checkpoint_path, test_file_path, output_fail_path, arch=None,
 
             # print accuracy
             accuracy = (total_correct / total_processed) * 100
-            group_accuracy = (group_total_correct / group_total_processed) * 100
+            group_accuracy = (group_total_correct / group_total_processed) * 100 if group_total_processed > 0 else 0
             accuracy_by_length[length] = group_accuracy
+            processed_by_length[length] = group_total_processed
             
             running_token_acc = (total_tokens_correct / total_tokens_count) * 100 if total_tokens_count > 0 else 0
             fail_token_acc = (fail_tokens_correct / fail_tokens_count) * 100 if fail_tokens_count > 0 else 0
@@ -502,9 +512,9 @@ def validate_model(checkpoint_path, test_file_path, output_fail_path, arch=None,
         f.write("=========================================\n\n")
 
         f.write("\n--- Breakdown by Prompt Length ---\n")
-        f.write("Token Length | Total Items | Accuracy\n")
+        f.write("Token Length | Processed Items | Accuracy\n")
         for g in sorted(accuracy_by_length.keys()):
-            stats = f"{g:2d} | {len(length_groups[g]):<10} | {accuracy_by_length[g]:.2f}%"
+            stats = f"{g:2d} | {processed_by_length[g]:<15} | {accuracy_by_length[g]:.2f}%"
             f.write(stats + "\n")
             
         f.write("\n--- Breakdown by Carry Operations ---\n")

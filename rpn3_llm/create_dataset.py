@@ -8,12 +8,13 @@ def generate_number(length):
 def reverse_string(s):
     return s[::-1]
 
-def generate_math_steps(a_str, b_str, op):
+def generate_math_steps(a_str, b_str, op, a_true, b_true):
     a_rev, b_rev = a_str[::-1], b_str[::-1]
     max_len = max(len(a_rev), len(b_rev))
     
     steps = []
     carry = 0
+    derived_digits = []
     
     if op == '+':
         for i in range(max_len):
@@ -23,17 +24,16 @@ def generate_math_steps(a_str, b_str, op):
             new_carry = res // 10
             digit = res % 10
             steps.append(f"{d_a}+{d_b}+{carry}={digit}")
+            derived_digits.append(str(digit))
             carry = new_carry
             
         if carry > 0:
             steps.append(f"0+0+{carry}={carry}")
+            derived_digits.append(str(carry))
             
-        ans = int(a_str) + int(b_str)
-        ans_rev = str(ans)[::-1]
-        return ":".join(steps), ans_rev, str(ans), str(ans)
+        ans = a_true + b_true
         
     elif op == '-':
-        derived_digits = []
         for i in range(max_len):
             d_a = int(a_rev[i]) if i < len(a_rev) else 0
             d_b = int(b_rev[i]) if i < len(b_rev) else 0
@@ -49,44 +49,48 @@ def generate_math_steps(a_str, b_str, op):
             derived_digits.append(str(res))
             carry = new_carry
             
-        scratchpad_math = ":".join(steps)
+        ans = a_true - b_true
         
-        if carry == 0:
-            # Positive answer
-            final_scratchpad = scratchpad_math + ":[BORROW]0|+" + ":" + "".join(derived_digits)
-        else:
-            # Negative answer
-            steps_part2 = ["[BORROW]1|-"]
-            tens_comp_digits = []
-            found_nonzero = False
-            for d_str in derived_digits:
-                d = int(d_str)
-                if not found_nonzero:
-                    if d == 0:
-                        steps_part2.append("[PASS]0=0")
-                        tens_comp_digits.append("0")
-                    else:
-                        comp = 10 - d
-                        steps_part2.append(f"10-{d}={comp}")
-                        tens_comp_digits.append(str(comp))
-                        found_nonzero = True
+    scratchpad_math = ":".join(steps)
+    
+    if ans >= 0:
+        # Positive answer
+        steps_str = scratchpad_math + ":[BORROW]0|+"
+        ans_rev = "".join(derived_digits)
+        ans_val_str = ans_rev[::-1]
+        full_math_str = f"[MATH]{steps_str}[REV]{ans_rev}"
+        return full_math_str, ans_val_str, str(ans)
+    else:
+        # Negative answer
+        steps_part2 = ["[BORROW]1|-"]
+        tens_comp_digits = []
+        found_nonzero = False
+        for d_str in derived_digits:
+            d = int(d_str)
+            if not found_nonzero:
+                if d == 0:
+                    steps_part2.append("[PASS]0=0")
+                    tens_comp_digits.append("0")
                 else:
-                    comp = 9 - d
-                    steps_part2.append(f"9-{d}={comp}")
+                    comp = 10 - d
+                    steps_part2.append(f"10-{d}={comp}")
                     tens_comp_digits.append(str(comp))
+                    found_nonzero = True
+            else:
+                comp = 9 - d
+                steps_part2.append(f"9-{d}={comp}")
+                tens_comp_digits.append(str(comp))
+        
+        steps_str = ":".join([scratchpad_math] + steps_part2)
+        ans_rev = "".join(tens_comp_digits)
+        
+        # Add negative sign to the reversed answer
+        ans_rev = "-" + ans_rev
             
-            steps_part2.append("".join(tens_comp_digits))
-            final_scratchpad = ":".join([scratchpad_math] + steps_part2)
-            
-        ans = int(a_str) - int(b_str)
-        ans_rev = str(ans)[::-1]
-        ans_val_str = str(ans)
-        if ans < 0:
-            # For negative numbers, the reversed string in the scratchpad is the complement part
-            ans_rev = "".join(tens_comp_digits) # Use the complement as the revans
-            ans_val_str = ans_rev[::-1] # Use unreversed complement for next step
-            
-        return final_scratchpad, ans_rev, ans_val_str, str(ans)
+        # For Math 2, we need the COMPLEMENT (derived_digits), NOT the magnitude!
+        ans_val_str = "".join(derived_digits)[::-1] 
+        full_math_str = f"[MATH]{steps_str}[REV]{ans_rev}"
+        return full_math_str, ans_val_str, str(ans)
 
 def generate_example():
     # 50% chance of 2 numbers or 3 numbers
@@ -100,30 +104,29 @@ def generate_example():
     n2 = generate_number(l2)
     op1 = random.choice(['+', '-'])
     
+    # Prompt and Reversal for the first 2 numbers
+    prompt = f"[BOS]{n1} {n2}{op1}"
+    rev1 = reverse_string(n1)
+    rev2 = reverse_string(n2)
+    reversal = f"[REV]{rev1} {rev2}{op1}"
+    
+    # Math 1
+    math1, ans1_val, ans1_true = generate_math_steps(n1, n2, op1, int(n1), int(n2))
+    
     if is_3_number:
         l3 = random.randint(1, 22)
         n3 = generate_number(l3)
         op2 = random.choice(['+', '-'])
-        
-        # Prompt: num1 num2+num3-?
-        prompt = f"[BOS]{n1} {n2}{op1}{n3}{op2}?"
-        
-        # Reversal: [REV]revnum1 revnum2+revnum3-=
-        rev1 = reverse_string(n1)
-        rev2 = reverse_string(n2)
         rev3 = reverse_string(n3)
-        reversal = f"[REV]{rev1} {rev2}{op1}{rev3}{op2}="
         
-        # Math 1
-        math1_steps, rev_ans1, ans1_val, ans1_true = generate_math_steps(n1, n2, op1)
-        math1 = f"[MATH]{math1_steps}[REV]{rev_ans1}"
+        # Append to prompt and reversal
+        prompt += f" {n3}{op2}?"
+        reversal += f"{rev3}{op2}="
         
-        # Transition: Transition shouldn't contain rev_ans1 as it is already in math1!
         transition = f" {rev3}{op2}="
         
         # Math 2
-        math2_steps, rev_ans2, ans2_val, ans2_true = generate_math_steps(ans1_val, n3, op2)
-        math2 = f"[MATH]{math2_steps}={rev_ans2}"
+        math2, ans2_val, ans2_true = generate_math_steps(ans1_val, n3, op2, int(ans1_true), int(n3))
         
         # Final Answer
         ans_line = f"[ANS]{ans2_true}[EOS]"
@@ -131,17 +134,8 @@ def generate_example():
         full_line = f"{prompt}{reversal}{math1}{transition}{math2}{ans_line}"
         return full_line, True, len(prompt)
     else:
-        # 2 numbers
-        prompt = f"[BOS]{n1} {n2}{op1}?"
-        
-        # Reversal
-        rev1 = reverse_string(n1)
-        rev2 = reverse_string(n2)
-        reversal = f"[REV]{rev1} {rev2}{op1}="
-        
-        math1_steps, rev_ans1, ans1_val, ans1_true = generate_math_steps(n1, n2, op1)
-        math1 = f"[MATH]{math1_steps}={rev_ans1}"
-        
+        prompt += "?"
+        reversal += "="
         ans_line = f"[ANS]{ans1_true}[EOS]"
         
         full_line = f"{prompt}{reversal}{math1}{ans_line}"
