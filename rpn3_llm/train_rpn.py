@@ -1,0 +1,458 @@
+import os
+import json
+import time
+import math
+import torch
+import wandb
+
+import sys
+from utils import RPNTokenizer, DataLoaderLite
+
+def run_teacher_forcing_validation(model, val_loader, device, step):
+    tokenizer = RPNTokenizer("rpn3_llm/rpn-tokenizer.json")
+    ans_id = tokenizer.encode("[ANS]")[0]
+    math_id = tokenizer.encode("[MATH]")[0]
+    rev_id = tokenizer.encode("[REV]")[0]
+    unk_id = tokenizer.encode("[UNK]")[0]
+    eos_id = tokenizer.encode("[EOS]")[0]
+    pad_id = tokenizer.encode("[PAD]")[0]
+    bos_id = tokenizer.encode("[BOS]")[0]
+    pad_id = 0 # [PAD] is 0
+
+    model.eval()
+    val_loss_accum = 0.0
+    val_loss_steps = 50
+    
+    # Equation-level counters (Final Answer only)
+    val_correct_accum = 0
+    val_target_accum = 0
+    
+    # Global token-level counters
+    val_rev_correct = 0; val_rev_target = 0
+    val_math_correct = 0; val_math_target = 0
+    val_ans_correct = 0; val_ans_target = 0
+
+    with torch.no_grad():
+        for _ in range(val_loss_steps):
+            x_val, y_val = val_loader.next_batch()
+            x_val, y_val = x_val.to(device), y_val.to(device)
+            # Mask out BOS (2) only. NL (1) MUST be learned so the model knows when to stop.
+            y_val_masked = y_val.clone()
+            y_val_masked[y_val_masked == 2] = -100
+            
+            with torch.autocast(device, dtype=torch.bfloat16):
+                logits, loss_val = model(x_val, y_val_masked)
+            val_loss_accum += loss_val.item()
+            
+            # Calculate accuracies
+            preds = torch.argmax(logits, dim=-1)
+            
+            # 1. Region-Level Token Accuracies
+            valid_mask = (y_val != unk_id) & (y_val != eos_id) & (y_val != pad_id) & (y_val != bos_id) & (y_val != -100)
+            
+            B, T = y_val.size()
+            valid_rev_mask = torch.zeros_like(y_val, dtype=torch.bool)
+            valid_math_mask = torch.zeros_like(y_val, dtype=torch.bool)
+            valid_ans_mask = torch.zeros_like(y_val, dtype=torch.bool)
+            
+            x_cpu = x_val.cpu()
+            y_cpu = y_val.cpu()
+            
+            for b in range(B):
+                has_bos = False
+                phase = None  # None, 'rev', 'math', 'ans'
+                for t in range(T):
+                    if x_cpu[b, t] == bos_id:
+                        has_bos = True
+                    elif x_cpu[b, t] == eos_id:
+                        has_bos = False
+                        phase = None
+                    
+                    if y_cpu[b, t] == rev_id:
+                        phase = 'rev'
+                    elif y_cpu[b, t] == math_id:
+                        phase = 'math'
+                    elif y_cpu[b, t] == ans_id:
+                        phase = 'ans'
+                        
+                    if has_bos:
+                        if phase == 'rev':
+                            valid_rev_mask[b, t] = True
+                        elif phase == 'math':
+                            valid_math_mask[b, t] = True
+                        elif phase == 'ans':
+                            valid_ans_mask[b, t] = True
+            
+            valid_rev_mask = valid_rev_mask.to(device) & valid_mask
+            valid_math_mask = valid_math_mask.to(device) & valid_mask
+            valid_ans_mask = valid_ans_mask.to(device) & valid_mask
+            
+            val_rev_correct += ((preds == y_val) & valid_rev_mask).sum().item()
+            val_rev_target += valid_rev_mask.sum().item()
+            
+            val_math_correct += ((preds == y_val) & valid_math_mask).sum().item()
+            val_math_target += valid_math_mask.sum().item()
+            
+            val_ans_correct += ((preds == y_val) & valid_ans_mask).sum().item()
+            val_ans_target += valid_ans_mask.sum().item()
+
+            # 2. Equation-Level Exact Match (Final Answer only)
+            preds_cpu = preds.cpu().numpy()
+            y_cpu = y_val.cpu().numpy()
+            
+            for b in range(y_val.size(0)):
+                gt_pos_y = None
+                for t in range(y_val.shape[1] - 1, -1, -1):
+                    if y_val[b, t].item() == ans_id:
+                        gt_pos_y = t
+                        break
+
+                if gt_pos_y is None:
+                    continue
+
+                offset = gt_pos_y + 1
+                equation_correct = True
+                token_count = 0
+
+                while offset < y_val.shape[1]:
+                    tok_y = y_cpu[b, offset]
+                    tok_p = preds_cpu[b, offset]
+
+                    if tok_y in (unk_id, eos_id, pad_id):
+                        break
+                    if tok_y != tok_p:
+                        equation_correct = False
+                    token_count += 1
+                    offset += 1
+
+                if token_count > 0:
+                    val_target_accum += 1.0
+                    if equation_correct:
+                        val_correct_accum += 1.0
+
+    val_loss_accum /= val_loss_steps
+    val_eq_accuracy_pct = (val_correct_accum / val_target_accum) * 100.0 if val_target_accum > 0 else 0.0
+    val_rev_accuracy_pct = (val_rev_correct / val_rev_target) * 100.0 if val_rev_target > 0 else 0.0
+    val_math_accuracy_pct = (val_math_correct / val_math_target) * 100.0 if val_math_target > 0 else 0.0
+    val_ans_accuracy_pct = (val_ans_correct / val_ans_target) * 100.0 if val_ans_target > 0 else 0.0
+    val_perplexity = math.exp(val_loss_accum)
+    
+    print(f"Step {step+1}, Val Loss: {val_loss_accum:.4f}, Val Eq Acc: {val_eq_accuracy_pct:.2f}%")
+    print(f"  Token Acc -> REV: {val_rev_accuracy_pct:.2f}%, MATH: {val_math_accuracy_pct:.2f}%, ANS: {val_ans_accuracy_pct:.2f}%, PPL: {val_perplexity:.4f}")
+    
+    model.train()
+    return val_loss_accum, val_perplexity, val_eq_accuracy_pct, val_rev_accuracy_pct, val_math_accuracy_pct, val_ans_accuracy_pct
+
+def run_generation_validation(model, val_loader, device, step, num_batches=4):
+    """
+    Performs real auto-regressive generation to measure TRUE accuracy.
+    This is slower, so we only run it on a few batches.
+    """
+    tokenizer = RPNTokenizer("rpn3_llm/rpn-tokenizer.json")
+    sep_id = tokenizer.encode("?")[0]
+    ans_id = tokenizer.encode("[ANS]")[0]
+    eos_id = tokenizer.encode("[EOS]")[0]
+    
+    model.eval()
+    total_correct = 0
+    total_equations = 0
+    max_new_tokens = 256
+    
+    with torch.no_grad():
+        for _ in range(num_batches):
+            x_val, y_val = val_loader.next_batch()
+            batch_size = x_val.size(0)
+            
+            for b in range(batch_size):
+                row_x = x_val[b].tolist()
+                row_y = y_val[b].tolist()
+                try:
+                    sep_pos = row_x.index(sep_id)
+                except ValueError:
+                    continue # No prompt start in this slice
+                
+                # The prompt is everything up to '?'
+                prompt_tokens = torch.tensor(row_x[:sep_pos+1], dtype=torch.long, device=device).unsqueeze(0)
+                
+                try:
+                    # In y_val, the first token is x_val[1], so sep_pos in x is sep_pos-1 in y if we align.
+                    # Actually, y_val is just x_val shifted. y[sep_pos] is the token after x[sep_pos].
+                    targets_shifted = row_y[sep_pos:]
+                    nl_pos_in_targets = targets_shifted.index(nl_id)
+                    full_target_seq = targets_shifted[:nl_pos_in_targets]
+                except ValueError:
+                    continue # Equation truncated by sequence end
+                
+                # Extract the expected final answer (after last >)
+                target_str = tokenizer.decode(full_target_seq)
+                if "[ANS]" not in target_str:
+                    continue
+                expected_answer = target_str.split("[ANS]")[-1].split("[UNK]")[0].split("[EOS]")[0].strip()
+                
+                # --- GENERATION ---
+                idx = prompt_tokens
+                past_kv = None
+                generated_tokens = []
+                
+                for _ in range(max_new_tokens):
+                    # Track phases for KV cache mask
+                    is_phase_shift = (idx == 10) | (idx == 11) | (idx == 12)
+                    full_phase_ids = is_phase_shift.cumsum(dim=-1)
+
+                    idx_cond = idx[:, -1:] if past_kv is not None else idx
+                    with torch.autocast(device, dtype=torch.bfloat16):
+                        logits, _, past_kv = model(idx_cond, use_cache=True, past_key_values=past_kv, full_phase_ids=full_phase_ids)
+                    
+                    logits = logits[:, -1, :]
+                    idx_next = torch.argmax(logits, dim=-1, keepdim=True)
+                    next_id = idx_next.item()
+                    
+                    if next_id == eos_id:
+                        break
+                    
+                    generated_tokens.append(next_id)
+                    idx = torch.cat((idx, idx_next), dim=1)
+                
+                # --- EVALUATION ---
+                pred_str = tokenizer.decode(generated_tokens)
+                pred_answer = pred_str.split("[ANS]")[-1].split("[UNK]")[0].split("[EOS]")[0].strip() if "[ANS]" in pred_str else "N/A"
+                
+                if pred_answer == expected_answer:
+                    total_correct += 1
+                total_equations += 1
+
+    gen_accuracy_pct = (total_correct / total_equations) * 100.0 if total_equations > 0 else 0.0
+    print(f"Step {step+1}, True Gen Accuracy: {gen_accuracy_pct:.2f}% ({total_correct}/{total_equations})")
+    model.train()
+    return gen_accuracy_pct
+
+def train_rpn_llm(start_step=0, checkpoint_path=None, model_type="rope", max_steps=80000, dataset_prefix="1-22_uniform_BOS", use_phase_mask=True, mlp_ratio=4, use_gated_residual=False, use_mohsa=False, rope_theta=10000.0, use_recency_bias=False, weight_decay=0.1):
+    device = 'cuda' if torch.cuda.is_available() else 'mps' if torch.backends.mps.is_available() else 'cpu'
+    print(f"Using device: {device}")
+
+    torch.manual_seed(1337)
+    if(torch.cuda.is_available()):
+        torch.cuda.manual_seed(1337)
+    
+    B = 16
+    T = 768  # Increased to 768 to capture 3 number problems
+    total_batch_size = B*T
+    assert total_batch_size % (B * T) == 0, "total_batch_size must be divisible by (B * T)"
+    grad_accum_steps = total_batch_size // (B * T)
+    print(f"Total batch size: {total_batch_size}")
+    print(f"Micro batch size: {B}")
+    print(f"Context length: {T}")
+    print(f"Gradient accumulation steps: {grad_accum_steps}")
+
+    # Select dataset
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    data_dir = os.path.join(script_dir, "data")
+    model_dir = os.path.join(script_dir, "models")
+    
+    train_dataset = os.path.join(data_dir, f"{dataset_prefix}_train.txt")
+    val_dataset = os.path.join(data_dir, f"{dataset_prefix}_val.txt")
+    
+    os.makedirs(model_dir, exist_ok=True)
+    train_loader = DataLoaderLite(B, T, train_dataset)
+    val_loader = DataLoaderLite(B, T, val_dataset)
+
+    torch.set_float32_matmul_precision('high')
+    
+    # Load model classes based on type
+    if model_type == "rdt":
+        from model_rdt import GPT, GPTConfig
+    else:
+        from model_rope import GPT, GPTConfig
+
+    checkpoint = None
+    config_in_checkpoint = False
+    if checkpoint_path is not None:
+        print(f"Loading checkpoint from {checkpoint_path}...")
+        checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
+        if 'config' in checkpoint:
+            print("Loading config from checkpoint...")
+            config = checkpoint['config']
+            config_in_checkpoint = True
+    
+    if not config_in_checkpoint:
+        if model_type == "rdt":
+            config = GPTConfig(vocab_size=64, n_prelude=1, n_coda=1, n_layer=6, n_head=8, n_embd=512, block_size=2048)
+        elif model_type == "ut":
+            config = GPTConfig(vocab_size=64, n_layer=3, n_head=8, n_embd=256, block_size=2048, universal=True, use_phase_mask=use_phase_mask, mlp_ratio=mlp_ratio, use_gated_residual=use_gated_residual, use_mohsa=use_mohsa, rope_theta=rope_theta, use_recency_bias=use_recency_bias)
+        elif model_type == "rope":
+            config = GPTConfig(vocab_size=64, n_layer=2, n_head=6, n_embd=192, block_size=2048, universal=False, use_phase_mask=use_phase_mask, mlp_ratio=mlp_ratio, use_gated_residual=use_gated_residual, use_mohsa=use_mohsa)
+
+    model = GPT(config)
+    model.to(device)
+    
+    # Extract structural params from config for logging (works for both rope and rdt)
+    n_layer = config.n_layer
+    n_head = config.n_head
+    n_embd = config.n_embd
+    # use mlp_ratio and use_phase_mask from config if available, otherwise from args
+    cur_mlp_ratio = getattr(config, 'mlp_ratio', mlp_ratio)
+    cur_use_phase_mask = getattr(config, 'use_phase_mask', use_phase_mask)
+    cur_use_gated_residual = getattr(config, 'use_gated_residual', use_gated_residual)
+    cur_use_mohsa = getattr(config, 'use_mohsa', use_mohsa)
+
+    # Calculate parameter count dynamically
+    num_params = sum(p.numel() for p in model.parameters())
+    param_str = f"{num_params/1e6:.1f}M"
+    model_prefix = f"{model_type}{param_str}_{n_layer}l_{n_head}h_{n_embd}e_mlp{cur_mlp_ratio}_phaseMask_{cur_use_phase_mask}"
+    if cur_use_gated_residual:
+        model_prefix += "_gated"
+    if cur_use_mohsa:
+        model_prefix += "_mohsa"
+    if rope_theta != 10000:
+        model_prefix += "_theta"
+    if use_recency_bias:
+        model_prefix += "_rb"
+    if weight_decay != 0.1:
+        model_prefix += f"_wt{weight_decay}"
+    
+    run_name = f"{model_prefix}_{dataset_prefix}"
+
+    if device == 'cuda':
+        model = torch.compile(model)
+    print(f"Initialized {model_type.upper()} Model: {model_prefix}")
+    print(f"Total Parameters: {num_params:,}")
+    
+    max_lr = 1e-4
+    min_lr = max_lr * 0.1
+    warmup_steps = 1000
+    lr_decay_steps = 62277
+    
+    def get_lr(it):
+        if it < warmup_steps:
+            return max_lr * (it+1) / warmup_steps
+        if it > lr_decay_steps:
+            return min_lr
+        decay_ratio = (it - warmup_steps) / (lr_decay_steps - warmup_steps)
+        assert 0 <= decay_ratio <= 1
+        coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio))
+        return min_lr + (max_lr - min_lr) * coeff
+    
+    # Combine training config with model config for wandb
+    import dataclasses
+    wandb_config = {
+        "model_type": model_type,
+        "dataset": dataset_prefix,
+        "total_batch_size": total_batch_size,
+        "B": B,
+        "T": T,
+        "grad_accum_steps": grad_accum_steps,
+        "max_lr": max_lr,
+        "min_lr": min_lr,
+        "warmup_steps": warmup_steps,
+        "max_steps": max_steps,
+        "num_params_M": sum(p.numel() for p in model.parameters()) / 1e6,
+    }
+    # Automatically add everything from GPTConfig!
+    wandb_config.update(dataclasses.asdict(config))
+
+    wandb.init(
+        project="rpn3-llm",
+        name=f"{run_name}",
+        config=wandb_config
+    )
+
+    optimizer = model.configure_optimizers(weight_decay=weight_decay, learning_rate=max_lr, device=device)
+    
+    if checkpoint is not None:
+        model.load_state_dict(checkpoint['model'])
+        optimizer.load_state_dict(checkpoint['optimizer'])
+        # advance dataloader to the precise step analytically
+        train_loader.current_pos = (start_step * grad_accum_steps * train_loader.B * train_loader.T) % train_loader.num_tokens
+        print(f"Resuming from step {start_step}! Dataloader synced to pos {train_loader.current_pos}")
+
+    for step in range(start_step, max_steps):
+        t0 = time.time()
+        optimizer.zero_grad()
+        loss_accum = 0
+        for micro_step in range(grad_accum_steps):
+            x, y = train_loader.next_batch()
+            x, y = x.to(device), y.to(device)
+            with torch.autocast(device, dtype=torch.bfloat16):
+                # Mask out BOS (2) only. NL (1) MUST be learned.
+                # This prevents the model from being penalized for unpredictable sequence transitions
+                y_masked = y.clone()
+                y_masked[y_masked == 2] = -100
+                logits, loss = model(x, y_masked)
+            loss = loss / grad_accum_steps
+            loss_accum += loss.detach()
+            loss.backward()
+            
+        norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+        lr = get_lr(step)
+        for param_group in optimizer.param_groups:
+            param_group['lr'] = lr
+        
+        optimizer.step()
+        if device == 'cuda':
+            torch.cuda.synchronize()
+        elif device == 'mps':
+            torch.mps.synchronize()
+            
+        t1 = time.time()
+        dt = (t1 - t0)*1000 # ms
+        tokens_per_sec = grad_accum_steps * train_loader.B * train_loader.T / (t1 - t0)
+        if (step+1) % 100 == 0:
+            print(f"Step {step+1}, Loss: {loss_accum.item():.4f}, lr: {lr:.4e}, norm: {norm:.4f}, Time: {dt:.2f}ms, Tokens per second: {tokens_per_sec:.2f}")
+
+        if (step+1) % 1000 == 0:
+            val_loss_accum, val_perplexity, val_eq_acc, val_rev_acc, val_math_acc, val_ans_acc = run_teacher_forcing_validation(model, val_loader, device, step)
+       
+        if (step+1) % 10 == 0:
+            log_dict = {
+                "loss": loss_accum.item(),
+                "lr": lr,
+                "norm": norm,
+                "time": dt,
+                "tokens_per_sec": tokens_per_sec,
+            }
+            if (step+1) % 1000 == 0:
+                log_dict["val_loss"] = val_loss_accum
+                log_dict["val_perplexity"] = val_perplexity
+                log_dict["val_equation_accuracy"] = val_eq_acc
+                log_dict["val_rev_accuracy"] = val_rev_acc
+                log_dict["val_math_accuracy"] = val_math_acc
+                log_dict["val_ans_accuracy"] = val_ans_acc
+            wandb.log(log_dict, step=step+1)
+    
+        if (step+1) % 8000 == 0:
+            checkpoint = {
+                'model': model.state_dict(),
+                'optimizer': optimizer.state_dict(),
+                'config': model.config,
+                'step': step,
+                'train_loader': train_loader,
+            }
+            torch.save(checkpoint, os.path.join(model_dir, f'{run_name}_{step+1}.pt'))
+            print(f"Model checkpoint saved to {os.path.join(model_dir, f'{run_name}_{step+1}.pt')}")
+   
+    wandb.finish()
+    if (step+1) % 8000 != 0:
+        torch.save(checkpoint, os.path.join(model_dir, f'{run_name}_{step+1}.pt'))
+        print(f"Model checkpoint saved to {os.path.join(model_dir, f'{run_name}_{step+1}.pt')}")
+
+if __name__ == "__main__":
+    import argparse
+    parser = argparse.ArgumentParser()
+    # Positional args
+    parser.add_argument("start_step", type=int, nargs="?", default=0, help="Step to resume from")
+    parser.add_argument("checkpoint_path", type=str, nargs="?", default=None, help="Path to checkpoint")
+    parser.add_argument("--model", type=str, default="rope", choices=["rope", "ut", "rdt"], help="Model architecture to train")
+    parser.add_argument("--max_steps", type=int, default=64000, help="Total steps to train for (default 80000)")
+    parser.add_argument("--dataset", type=str, default="1-22_uniform_BOS", help="Dataset prefix")
+    parser.add_argument("--no_phase_mask", action="store_false", dest="use_phase_mask", help="Disable sequential phase masking")
+    parser.add_argument("--mlp_ratio", type=int, default=4, help="MLP expansion ratio (default 4)")
+    parser.add_argument("--use_gated_residual", action="store_true", help="Enable data-dependent gating for residuals")
+    parser.add_argument("--use_mohsa", action="store_true", help="Enable Multi-Overlapped-Head Self-Attention")
+    parser.add_argument("--rope_theta", type=float, default=10000.0, help="Base for RoPE frequencies")
+    parser.add_argument("--use_recency_bias", action="store_true", help="Enable relative position bias for recency")
+    parser.add_argument("--weight_decay", type=float, default=0.1, help="Weight decay for AdamW (default 0.1)")
+    parser.set_defaults(use_phase_mask=True)
+    
+    args = parser.parse_args()
+        
+    train_rpn_llm(args.start_step, args.checkpoint_path, args.model, args.max_steps, args.dataset, args.use_phase_mask, args.mlp_ratio, args.use_gated_residual, args.use_mohsa, args.rope_theta, args.use_recency_bias, args.weight_decay)
