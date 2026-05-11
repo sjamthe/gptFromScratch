@@ -38,7 +38,32 @@ def calculate_carries(a_str, b_str, op):
                 carry_val = 0
     return carries
 
-def validate_model(checkpoint_path, test_file_path, output_fail_path, arch=None, num_passes=None, early_stop=None, force_mask=None):
+def get_prompt_for_phase(line, phase):
+    """
+    Returns the string representing the prompt for the specified testing phase.
+    """
+    if phase == "MATH1":
+        parts = line.split("[MATH]")
+        if len(parts) > 1:
+            return parts[0] + "[MATH]"
+    elif phase == "REV2":
+        parts = line.split("[REV]")
+        if len(parts) > 2:
+            return parts[0] + "[REV]" + parts[1] + "[REV]"
+    elif phase == "MATH2":
+        parts = line.split("[MATH]")
+        if len(parts) > 2:
+            return parts[0] + "[MATH]" + parts[1] + "[MATH]"
+    elif phase == "ANS":
+        parts = line.split("[ANS]")
+        if len(parts) > 1:
+            return parts[0] + "[ANS]"
+    
+    # Default to REV1 (split at '?')
+    parts = line.split("?")
+    return parts[0] + "?" if len(parts) > 1 else line
+
+def validate_model(checkpoint_path, test_file_path, output_fail_path, arch=None, num_passes=None, early_stop=None, force_mask=None, test_phase="REV1"):
     device = 'cuda' if torch.cuda.is_available() else 'mps' if torch.backends.mps.is_available() else 'cpu'
     print(f"Using device: {device}")
 
@@ -92,14 +117,16 @@ def validate_model(checkpoint_path, test_file_path, output_fail_path, arch=None,
     for line in lines:
         if "?" not in line:
             continue
-        
-        # Find index of '?'
-        try:
-            sep_idx = line.index("?")
-        except ValueError:
-            continue
             
-        length_groups[sep_idx + 1].append(line.rstrip())
+        line_clean = line.rstrip()
+        prompt_str = get_prompt_for_phase(line_clean, test_phase)
+        
+        # We must group by the exact number of tokens in the prompt
+        prompt_tokens = tokenizer.encode(prompt_str)
+        prompt_len = len(prompt_tokens)
+        
+        length_groups[prompt_len].append((prompt_tokens, line_clean))
+        
         
     # free lines memory
     del lines
@@ -121,10 +148,6 @@ def validate_model(checkpoint_path, test_file_path, output_fail_path, arch=None,
         'neg_intermediate': {'total': 0, 'correct': 0},
         'normal': {'total': 0, 'correct': 0}
     }
-    
-    # Max generation steps for an answer
-    max_new_tokens = 256
-
     # Enhanced Failure Categorization
     failure_categories = {
         'reversal_skipped': 0,
@@ -136,7 +159,7 @@ def validate_model(checkpoint_path, test_file_path, output_fail_path, arch=None,
     # Stats by problem type (2-num vs 3-num)
     type_stats = {
         '2-num': {'total': 0, 'correct': 0, 'reversal_failed': 0, 'math_failed': 0, 'only_final_ans_failed': 0},
-        '3-num': {'total': 0, 'correct': 0, 'reversal_failed': 0, 'math_failed': 0, 'only_final_ans_failed': 0, 'math1_failed': 0, 'math2_failed': 0}
+        '3-num': {'total': 0, 'correct': 0, 'reversal_failed': 0, 'math_failed': 0, 'only_final_ans_failed': 0, 'math1_failed': 0, 'math2_failed': 0, 'rev2_failed': 0}
     }
     reversal_fail_by_spaces = defaultdict(int) # Key: (s1_len, s2_len)
     reversal_pos_failures = {'num1': 0, 'num2': 0, 'num3': 0, 'both': 0, 'malformed': 0}
@@ -190,20 +213,19 @@ def validate_model(checkpoint_path, test_file_path, output_fail_path, arch=None,
             expected_tokens_list = []
             prompt_strs = []
             
-            for line_str in batch_items:
+            for prompt_tokens, line_str in batch_items:
                 line_tokens = tokenizer.encode(line_str)
-                try:
-                    sep_idx = line_tokens.index(eq_id)
-                except ValueError:
-                    # Fallback if '?' is missing for some reason
-                    sep_idx = len(line_tokens) - 1
-                    
-                prompt_tokens = line_tokens[:sep_idx + 1]
-                expected_tokens_list.append(line_tokens[sep_idx + 1:])
+                prompt_len = len(prompt_tokens)
                 
+                expected_tokens_list.append(line_tokens[prompt_len:])
                 batch_prompt_tokens.append(prompt_tokens)
                 prompt_strs.append(tokenizer.decode(prompt_tokens).strip())
                 expected_strs.append(line_str.split('?', 1)[1].strip())
+            
+            # Dynamically calculate the maximum tokens needed for this specific batch
+            # We add a small buffer (+10) to allow the model to fully finish its hallucination and close EOS
+            max_batch_expected = max(len(t) for t in expected_tokens_list) if expected_tokens_list else 0
+            max_new_tokens = max_batch_expected + 10
             
             # Construct (B, L) tensor natively (no padding required because all logic lengths identically match)
             prompts = torch.tensor(batch_prompt_tokens, dtype=torch.long, device=device)
@@ -261,11 +283,13 @@ def validate_model(checkpoint_path, test_file_path, output_fail_path, arch=None,
                 # Truncate string sequence at [EOS] (to match exactly)
                 if eos_id in gen_answer_tokens:
                     eos_idx = gen_answer_tokens.index(eos_id)
-                    gen_answer_tokens = gen_answer_tokens[:eos_idx+1]
+                    gen_answer_tokens = gen_answer_tokens[:eos_idx]
                 
-                # Compare
+                actual_str = tokenizer.decode(gen_answer_tokens).strip()
+                
+                prompt_after_q = prompt_strs[b].split('?', 1)[1] if '?' in prompt_strs[b] else ""
+                predicted_str = prompt_after_q + actual_str
                 expected_str = expected_strs[b]
-                predicted_str = tokenizer.decode(gen_answer_tokens).strip() 
                 prompt_str = prompt_strs[b]
                 total_length = len(prompt_str) + len(expected_str)
                 
@@ -358,6 +382,7 @@ def validate_model(checkpoint_path, test_file_path, output_fail_path, arch=None,
                     
                     matched = False
                     math1_fail = False
+                    rev2_fail = False
                     math2_fail = False
                     if is_reversal_skip:
                         failure_categories['reversal_skipped'] += 1
@@ -428,7 +453,17 @@ def validate_model(checkpoint_path, test_file_path, output_fail_path, arch=None,
                                 exp_math1 = exp_m_parts[0].strip()
                                 pred_math1 = pred_m_parts[0].strip() if len(pred_m_parts) >= 1 else ""
                                 if exp_math1 != pred_math1:
-                                    math1_fail = True
+                                    # Split by [REV] to separate MATH1 from REV2
+                                    exp_m1_parts = exp_math1.split("[REV]")
+                                    pred_m1_parts = pred_math1.split("[REV]")
+                                    
+                                    exp_m1_trace = exp_m1_parts[0].strip() if len(exp_m1_parts) > 0 else ""
+                                    pred_m1_trace = pred_m1_parts[0].strip() if len(pred_m1_parts) > 0 else ""
+                                    
+                                    if exp_m1_trace != pred_m1_trace:
+                                        math1_fail = True
+                                    else:
+                                        rev2_fail = True
                             
                             if len(exp_m_parts) >= 2:
                                 exp_math2 = exp_m_parts[1].strip()
@@ -442,6 +477,8 @@ def validate_model(checkpoint_path, test_file_path, output_fail_path, arch=None,
                                 
                             if math1_fail:
                                 type_stats['3-num']['math1_failed'] += 1
+                            elif rev2_fail:
+                                type_stats['3-num']['rev2_failed'] += 1
                             elif math2_fail:
                                 type_stats['3-num']['math2_failed'] += 1
                     
@@ -578,7 +615,8 @@ def validate_model(checkpoint_path, test_file_path, output_fail_path, arch=None,
         if p_type == '3-num':
             m1 = stats.get('math1_failed', 0)
             m2 = stats.get('math2_failed', 0)
-            print(f"  Failures -> Rev: {stats['reversal_failed']}, Math: {stats['math_failed']} (Math1: {m1}, Math2: {m2}), Ans: {stats['only_final_ans_failed']}")
+            r2 = stats.get('rev2_failed', 0)
+            print(f"  Failures -> Rev: {stats['reversal_failed']}, Math: {stats['math_failed']} (Math1: {m1}, Rev2: {r2}, Math2: {m2}), Ans: {stats['only_final_ans_failed']}")
         else:
             print(f"  Failures -> Rev: {stats['reversal_failed']}, Math: {stats['math_failed']}, Ans: {stats['only_final_ans_failed']}")
 
@@ -597,7 +635,8 @@ def validate_model(checkpoint_path, test_file_path, output_fail_path, arch=None,
             if p_type == '3-num':
                 m1 = stats.get('math1_failed', 0)
                 m2 = stats.get('math2_failed', 0)
-                f.write(f"  Failures -> Rev: {stats['reversal_failed']}, Math: {stats['math_failed']} (Math1: {m1}, Math2: {m2}), Ans: {stats['only_final_ans_failed']}\n")
+                r2 = stats.get('rev2_failed', 0)
+                f.write(f"  Failures -> Rev: {stats['reversal_failed']}, Math: {stats['math_failed']} (Math1: {m1}, Rev2: {r2}, Math2: {m2}), Ans: {stats['only_final_ans_failed']}\n")
             else:
                 f.write(f"  Failures -> Rev: {stats['reversal_failed']}, Math: {stats['math_failed']}, Ans: {stats['only_final_ans_failed']}\n")
 
@@ -624,6 +663,7 @@ if __name__ == "__main__":
     parser.add_argument("--num_passes", type=int, default=None, help="Force number of universal passes")
     parser.add_argument("--early_stop", type=int, default=None, help="Stop if logit is stable for N passes")
     parser.add_argument("--force_mask", type=str, default=None, choices=["True", "False"], help="Force enable/disable phase mask")
+    parser.add_argument("--test_phase", type=str, default="REV1", choices=["REV1", "MATH1", "REV2", "MATH2", "ANS"], help="Phase to begin generation from")
     
     args = parser.parse_args()
     
@@ -635,6 +675,7 @@ if __name__ == "__main__":
         model_basename = os.path.basename(args.model)
         model_name = model_basename.replace(".pt", "")
         fmask_str = f"_fmask_{fmask}" if fmask is not None else ""
-        args.output_file = f"rpn3_llm/results/{model_name}{fmask_str}_failures.txt"
+        phase_str = f"_phase_{args.test_phase}" if args.test_phase != "REV1" else ""
+        args.output_file = f"rpn3_llm/results/{model_name}{fmask_str}{phase_str}_failures.txt"
 
-    validate_model(args.model, args.test_file, args.output_file, arch=args.arch, num_passes=args.num_passes, early_stop=args.early_stop, force_mask=fmask)
+    validate_model(args.model, args.test_file, args.output_file, arch=args.arch, num_passes=args.num_passes, early_stop=args.early_stop, force_mask=fmask, test_phase=args.test_phase)
