@@ -274,7 +274,7 @@ def run_generation_validation(model, val_loader, device, step, num_batches=4):
     model.train()
     return gen_accuracy_pct
 
-def train_rpn_llm(start_step=0, checkpoint_path=None, model_type="rope", max_steps=80000, dataset_prefix="1-22_uniform_BOS", use_phase_mask=True, mlp_ratio=4, use_gated_residual=False, use_mohsa=False, rope_theta=10000.0, use_recency_bias=False, weight_decay=0.1):
+def train_rpn_llm(start_step=0, checkpoint_path=None, model_type="rope", max_steps=80000, dataset_prefix="1-22_uniform_BOS", use_phase_mask=True, mlp_ratio=4, tau=1.0, use_gated_residual=False, use_mohsa=False, rope_theta=10000.0, use_recency_bias=False, weight_decay=0.1):
     device = 'cuda' if torch.cuda.is_available() else 'mps' if torch.backends.mps.is_available() else 'cpu'
     print(f"Using device: {device}")
 
@@ -335,7 +335,7 @@ def train_rpn_llm(start_step=0, checkpoint_path=None, model_type="rope", max_ste
         if model_type == "rdt":
             config = GPTConfig(vocab_size=64, n_prelude=1, n_coda=1, n_layer=6, n_head=8, n_embd=512, block_size=2048)
         elif model_type == "ut":
-            config = GPTConfig(vocab_size=64, n_layer=2, n_head=8, n_embd=256, block_size=2048, universal=True, use_phase_mask=use_phase_mask, mlp_ratio=mlp_ratio, use_gated_residual=use_gated_residual, use_mohsa=use_mohsa, rope_theta=rope_theta, use_recency_bias=use_recency_bias, bos_token_id=bos_id, phase_token_ids=phase_token_ids)
+            config = GPTConfig(vocab_size=64, n_layer=2, n_head=8, n_embd=256, block_size=2048, universal=True, tau=tau, use_phase_mask=use_phase_mask, mlp_ratio=mlp_ratio, use_gated_residual=use_gated_residual, use_mohsa=use_mohsa, rope_theta=rope_theta, use_recency_bias=use_recency_bias, bos_token_id=bos_id, phase_token_ids=phase_token_ids)
         elif model_type == "rope":
             config = GPTConfig(vocab_size=64, n_layer=2, n_head=6, n_embd=192, block_size=2048, universal=False, use_phase_mask=use_phase_mask, mlp_ratio=mlp_ratio, use_gated_residual=use_gated_residual, use_mohsa=use_mohsa, bos_token_id=bos_id, phase_token_ids=phase_token_ids)
 
@@ -366,7 +366,8 @@ def train_rpn_llm(start_step=0, checkpoint_path=None, model_type="rope", max_ste
         model_prefix += "_rb"
     if weight_decay != 0.1:
         model_prefix += f"_wt{weight_decay}"
-    
+    if tau != 1.0:
+        model_prefix += f"_tau{tau}"
     run_name = f"{model_prefix}_{dataset_prefix}"
 
     if device == 'cuda':
@@ -505,6 +506,7 @@ if __name__ == "__main__":
     parser.add_argument("--dataset", type=str, default="1-22_uniform_BOS", help="Dataset prefix")
     parser.add_argument("--no_phase_mask", action="store_false", dest="use_phase_mask", help="Disable sequential phase masking")
     parser.add_argument("--mlp_ratio", type=int, default=4, help="MLP expansion ratio (default 4)")
+    parser.add_argument("--tau", type=float, default=1.0, help="Tau for sharp focus in attention (default 1.0)")
     parser.add_argument("--use_gated_residual", action="store_true", help="Enable data-dependent gating for residuals")
     parser.add_argument("--use_mohsa", action="store_true", help="Enable Multi-Overlapped-Head Self-Attention")
     parser.add_argument("--rope_theta", type=float, default=10000.0, help="Base for RoPE frequencies")
@@ -514,4 +516,4 @@ if __name__ == "__main__":
     
     args = parser.parse_args()
         
-    train_rpn_llm(args.start_step, args.checkpoint_path, args.model, args.max_steps, args.dataset, args.use_phase_mask, args.mlp_ratio, args.use_gated_residual, args.use_mohsa, args.rope_theta, args.use_recency_bias, args.weight_decay)
+    train_rpn_llm(args.start_step, args.checkpoint_path, args.model, args.max_steps, args.dataset, args.use_phase_mask, args.mlp_ratio, args.tau, args.use_gated_residual, args.use_mohsa, args.rope_theta, args.use_recency_bias, args.weight_decay)

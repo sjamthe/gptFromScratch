@@ -392,6 +392,7 @@ def validate_model(checkpoint_path, test_file_path, output_fail_path, arch=None,
                         failure_categories['reversal_failed'] += 1
                         matched = True
                         reversal_fail_by_spaces[space_key] += 1
+                        fail_str = "" # Initialize to avoid UnboundLocalError
                         
                         # Analyze WHICH number failed in the reversal
                         try:

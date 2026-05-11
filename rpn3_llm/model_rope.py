@@ -22,6 +22,7 @@ class GPTConfig:
     use_recency_bias: bool = False # if True, use relative position bias for recency
     bos_token_id: int = 2
     phase_token_ids: list = None
+    tau: float = 1.0 # sharpness of attention
 
 # --- RoPE Implementation ---
 def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0):
@@ -77,6 +78,9 @@ class CausalSelfAttention(nn.Module):
         if self.use_recency_bias:
             self.recency_bias = RecencyBias(max_len=64)
         # No absolute bias mask initialization needed for flash attention
+
+        # Lower tau is used to sharpen attention to a token if it is hazzy
+        self.tau = getattr(config, 'tau', 1.0)
     
     def forward(self, x: torch.Tensor, freqs_cis: torch.Tensor, use_cache: bool = False, cache_state: tuple = None, return_attention: bool = False, attn_mask: torch.Tensor = None, head_mask: torch.Tensor = None) -> tuple:
         B, T, C = x.size()
@@ -213,6 +217,9 @@ class CausalSelfAttention(nn.Module):
         q = q.transpose(1, 2)
         k = k.transpose(1, 2)
         v = v.transpose(1, 2)
+
+        if self.tau < 1.0 and self.tau > 0.0:
+            q = q/self.tau
 
         if use_cache:
             if cache_state is not None:
