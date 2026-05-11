@@ -100,30 +100,33 @@ def run_teacher_forcing_validation(model, val_loader, device, step):
             preds_cpu = preds.cpu().numpy()
             y_cpu = y_val.cpu().numpy()
             
-            for b in range(y_val.size(0)):
-                gt_pos_y = None
-                for t in range(y_val.shape[1] - 1, -1, -1):
-                    if y_val[b, t].item() == ans_id:
-                        gt_pos_y = t
+            for b in range(y_cpu.shape[0]):
+                start_pos = None
+                for t in range(y_cpu.shape[1]):
+                    if y_cpu[b, t] == rev_id:
+                        start_pos = t
                         break
 
-                if gt_pos_y is None:
+                if start_pos is None:
                     continue
 
-                offset = gt_pos_y + 1
                 equation_correct = True
                 token_count = 0
 
-                while offset < y_val.shape[1]:
-                    tok_y = y_cpu[b, offset]
-                    tok_p = preds_cpu[b, offset]
+                for t in range(start_pos, y_cpu.shape[1]):
+                    tok_y = y_cpu[b, t]
+                    tok_p = preds_cpu[b, t]
 
-                    if tok_y in (unk_id, eos_id, pad_id):
+                    if tok_y in (unk_id, pad_id):
                         break
+
                     if tok_y != tok_p:
                         equation_correct = False
+
                     token_count += 1
-                    offset += 1
+
+                    if tok_y == eos_id:
+                        break
 
                 if token_count > 0:
                     val_target_accum += 1.0
@@ -137,8 +140,8 @@ def run_teacher_forcing_validation(model, val_loader, device, step):
     val_ans_accuracy_pct = (val_ans_correct / val_ans_target) * 100.0 if val_ans_target > 0 else 0.0
     val_perplexity = math.exp(val_loss_accum)
     
-    print(f"Step {step+1}, Val Loss: {val_loss_accum:.4f}, Val Eq Acc: {val_eq_accuracy_pct:.2f}%")
-    print(f"  Token Acc -> REV: {val_rev_accuracy_pct:.2f}%, MATH: {val_math_accuracy_pct:.2f}%, ANS: {val_ans_accuracy_pct:.2f}%, PPL: {val_perplexity:.4f}")
+    print(f"Step {step+1}, Val Loss: {val_loss_accum:.4f}, Val Eq Acc: {val_eq_accuracy_pct:.4f}%")
+    print(f"  Token Acc -> REV: {val_rev_accuracy_pct:.4f}%, MATH: {val_math_accuracy_pct:.4f}%, ANS: {val_ans_accuracy_pct:.4f}%, PPL: {val_perplexity:.4f}")
     
     model.train()
     return val_loss_accum, val_perplexity, val_eq_accuracy_pct, val_rev_accuracy_pct, val_math_accuracy_pct, val_ans_accuracy_pct
@@ -287,7 +290,7 @@ def train_rpn_llm(start_step=0, checkpoint_path=None, model_type="rope", max_ste
         if model_type == "rdt":
             config = GPTConfig(vocab_size=64, n_prelude=1, n_coda=1, n_layer=6, n_head=8, n_embd=512, block_size=2048)
         elif model_type == "ut":
-            config = GPTConfig(vocab_size=64, n_layer=3, n_head=8, n_embd=256, block_size=2048, universal=True, use_phase_mask=use_phase_mask, mlp_ratio=mlp_ratio, use_gated_residual=use_gated_residual, use_mohsa=use_mohsa, rope_theta=rope_theta, use_recency_bias=use_recency_bias, bos_token_id=bos_id, phase_token_ids=phase_token_ids)
+            config = GPTConfig(vocab_size=64, n_layer=2, n_head=8, n_embd=256, block_size=2048, universal=True, use_phase_mask=use_phase_mask, mlp_ratio=mlp_ratio, use_gated_residual=use_gated_residual, use_mohsa=use_mohsa, rope_theta=rope_theta, use_recency_bias=use_recency_bias, bos_token_id=bos_id, phase_token_ids=phase_token_ids)
         elif model_type == "rope":
             config = GPTConfig(vocab_size=64, n_layer=2, n_head=6, n_embd=192, block_size=2048, universal=False, use_phase_mask=use_phase_mask, mlp_ratio=mlp_ratio, use_gated_residual=use_gated_residual, use_mohsa=use_mohsa, bos_token_id=bos_id, phase_token_ids=phase_token_ids)
 

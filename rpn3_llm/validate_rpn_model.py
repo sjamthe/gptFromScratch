@@ -6,7 +6,7 @@ import time
 from collections import defaultdict
 from utils import RPNTokenizer, DataLoaderLite
 
-VALIDATION_SET_RATIO = 0.10
+VALIDATION_SET_RATIO = 0.2
 
 def calculate_carries(a_str, b_str, op):
     a, b = int(a_str), int(b_str)
