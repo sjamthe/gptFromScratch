@@ -18,6 +18,7 @@ def run_teacher_forcing_validation(model, val_loader, device, step):
     pad_id = tokenizer.encode("[PAD]")[0]
     bos_id = tokenizer.encode("[BOS]")[0]
     pad_id = 0 # [PAD] is 0
+    nl_id = tokenizer.encode("\n")[0]
 
     model.eval()
     val_loss_accum = 0.0
@@ -28,9 +29,17 @@ def run_teacher_forcing_validation(model, val_loader, device, step):
     val_target_accum = 0
     
     # Global token-level counters
-    val_rev_correct = 0; val_rev_target = 0
-    val_math_correct = 0; val_math_target = 0
-    val_ans_correct = 0; val_ans_target = 0
+    val_rev1_total = 0
+    val_rev1_errors = 0
+    val_math1_total = 0
+    val_math1_errors = 0
+    val_rev2_total = 0
+    val_rev2_errors = 0
+    val_math2_total = 0
+    val_math2_errors = 0
+    val_ans_total = 0
+    val_ans_errors = 0
+    debug_print_count = 0
 
     with torch.no_grad():
         for _ in range(val_loss_steps):
@@ -47,104 +56,140 @@ def run_teacher_forcing_validation(model, val_loader, device, step):
             # Calculate accuracies
             preds = torch.argmax(logits, dim=-1)
             
-            # 1. Region-Level Token Accuracies
-            valid_mask = (y_val != unk_id) & (y_val != eos_id) & (y_val != pad_id) & (y_val != bos_id) & (y_val != -100)
-            
-            B, T = y_val.size()
-            valid_rev_mask = torch.zeros_like(y_val, dtype=torch.bool)
-            valid_math_mask = torch.zeros_like(y_val, dtype=torch.bool)
-            valid_ans_mask = torch.zeros_like(y_val, dtype=torch.bool)
-            
-            x_cpu = x_val.cpu()
-            y_cpu = y_val.cpu()
-            
-            for b in range(B):
-                has_bos = False
-                phase = None  # None, 'rev', 'math', 'ans'
-                for t in range(T):
-                    if x_cpu[b, t] == bos_id:
-                        has_bos = True
-                    elif x_cpu[b, t] == eos_id:
-                        has_bos = False
-                        phase = None
-                    
-                    if y_cpu[b, t] == rev_id:
-                        phase = 'rev'
-                    elif y_cpu[b, t] == math_id:
-                        phase = 'math'
-                    elif y_cpu[b, t] == ans_id:
-                        phase = 'ans'
-                        
-                    if has_bos:
-                        if phase == 'rev':
-                            valid_rev_mask[b, t] = True
-                        elif phase == 'math':
-                            valid_math_mask[b, t] = True
-                        elif phase == 'ans':
-                            valid_ans_mask[b, t] = True
-            
-            valid_rev_mask = valid_rev_mask.to(device) & valid_mask
-            valid_math_mask = valid_math_mask.to(device) & valid_mask
-            valid_ans_mask = valid_ans_mask.to(device) & valid_mask
-            
-            val_rev_correct += ((preds == y_val) & valid_rev_mask).sum().item()
-            val_rev_target += valid_rev_mask.sum().item()
-            
-            val_math_correct += ((preds == y_val) & valid_math_mask).sum().item()
-            val_math_target += valid_math_mask.sum().item()
-            
-            val_ans_correct += ((preds == y_val) & valid_ans_mask).sum().item()
-            val_ans_target += valid_ans_mask.sum().item()
-
-            # 2. Equation-Level Exact Match (Final Answer only)
+            # 1. Phase-Level and Equation-Level Exact Match
             preds_cpu = preds.cpu().numpy()
             y_cpu = y_val.cpu().numpy()
+            x_cpu = x_val.cpu().numpy()
             
             for b in range(y_cpu.shape[0]):
+                # Find the first [BOS] in the input sequence (since it's masked in y_val)
                 start_pos = None
-                for t in range(y_cpu.shape[1]):
-                    if y_cpu[b, t] == rev_id:
-                        start_pos = t
+                for t in range(x_cpu.shape[1]):
+                    if x_cpu[b, t] == bos_id:
+                        start_pos = t + 1
                         break
-
+                        
                 if start_pos is None:
+                    continue
+                    
+                # Find the first [REV] after the [BOS]
+                rev_start = None
+                for t in range(start_pos, y_cpu.shape[1]):
+                    if y_cpu[b, t] == rev_id:
+                        rev_start = t
+                        break
+                        
+                if rev_start is None:
+                    continue
+
+                # Decode the prompt from x_cpu (since y_cpu has -100 for the masked prompt)
+                prompt_str = tokenizer.decode(x_cpu[b, start_pos:rev_start]).strip()
+                if len(prompt_str) < 1:
                     continue
 
                 equation_correct = True
+                equation_finished = False
+                rev1_error = False
+                math1_error = False
+                rev2_error = False
+                math2_error = False
+                ans_error = False
+                
+                rev_count = 0
+                math_count = 0
+                phase = None
                 token_count = 0
+                phases_reached = set()
 
-                for t in range(start_pos, y_cpu.shape[1]):
+                for t in range(rev_start, y_cpu.shape[1]):
                     tok_y = y_cpu[b, t]
                     tok_p = preds_cpu[b, t]
 
-                    if tok_y in (unk_id, pad_id):
+                    if tok_y in (unk_id, pad_id) or tok_y == nl_id:
                         break
+
+                    # Update phase
+                    if tok_y == rev_id:
+                        rev_count += 1
+                        if rev_count == 1:
+                            phase = 'rev1'
+                        elif rev_count >= 2:
+                            phase = 'rev2'
+                    elif tok_y == math_id:
+                        math_count += 1
+                        if math_count == 1:
+                            phase = 'math1'
+                        elif math_count >= 2:
+                            phase = 'math2'
+                    elif tok_y == ans_id:
+                        phase = 'ans'
+
+                    if phase:
+                        phases_reached.add(phase)
 
                     if tok_y != tok_p:
                         equation_correct = False
+                        if phase == 'rev1':
+                            rev1_error = True
+                            if debug_print_count < 0: # disabled
+                                # (prompt_str is already calculated above)
+                                exp_str = tokenizer.decode([tok_y])
+                                pred_str = tokenizer.decode([tok_p])
+                                print(f"DEBUG [REV1 FAIL]: Prompt: {prompt_str} | Exp: '{exp_str}' | Pred: '{pred_str}'")
+                                debug_print_count += 1
+                        elif phase == 'math1':
+                            math1_error = True
+                        elif phase == 'rev2':
+                            rev2_error = True
+                        elif phase == 'math2':
+                            math2_error = True
+                        elif phase == 'ans':
+                            ans_error = True
+                        break
 
                     token_count += 1
 
                     if tok_y == eos_id:
+                        equation_finished = True
                         break
 
-                if token_count > 0:
+                if token_count > 0 and (equation_finished or not equation_correct):
                     val_target_accum += 1.0
                     if equation_correct:
                         val_correct_accum += 1.0
+                    if 'rev1' in phases_reached: val_rev1_total += 1
+                    if 'math1' in phases_reached: val_math1_total += 1
+                    if 'rev2' in phases_reached: val_rev2_total += 1
+                    if 'math2' in phases_reached: val_math2_total += 1
+                    if 'ans' in phases_reached: val_ans_total += 1
+                    
+                    if rev1_error:
+                        val_rev1_errors += 1.0
+                    if math1_error:
+                        val_math1_errors += 1.0
+                    if rev2_error:
+                        val_rev2_errors += 1.0
+                    if math2_error:
+                        val_math2_errors += 1.0
+                    if ans_error:
+                        val_ans_errors += 1.0
 
     val_loss_accum /= val_loss_steps
     val_eq_accuracy_pct = (val_correct_accum / val_target_accum) * 100.0 if val_target_accum > 0 else 0.0
-    val_rev_accuracy_pct = (val_rev_correct / val_rev_target) * 100.0 if val_rev_target > 0 else 0.0
-    val_math_accuracy_pct = (val_math_correct / val_math_target) * 100.0 if val_math_target > 0 else 0.0
-    val_ans_accuracy_pct = (val_ans_correct / val_ans_target) * 100.0 if val_ans_target > 0 else 0.0
+    val_rev1_errors_pct = (val_rev1_errors / val_rev1_total) * 100.0 if val_rev1_total > 0 else 0.0
+    val_math1_errors_pct = (val_math1_errors / val_math1_total) * 100.0 if val_math1_total > 0 else 0.0
+    val_rev2_errors_pct = (val_rev2_errors / val_rev2_total) * 100.0 if val_rev2_total > 0 else 0.0
+    val_math2_errors_pct = (val_math2_errors / val_math2_total) * 100.0 if val_math2_total > 0 else 0.0
+    val_ans_errors_pct = (val_ans_errors / val_ans_total) * 100.0 if val_ans_total > 0 else 0.0
     val_perplexity = math.exp(val_loss_accum)
     
-    print(f"Step {step+1}, Val Loss: {val_loss_accum:.4f}, Val Eq Acc: {val_eq_accuracy_pct:.4f}%")
-    print(f"  Token Acc -> REV: {val_rev_accuracy_pct:.4f}%, MATH: {val_math_accuracy_pct:.4f}%, ANS: {val_ans_accuracy_pct:.4f}%, PPL: {val_perplexity:.4f}")
+    stmt = f"Step {step+1}, Val Loss: {val_loss_accum:.4f}, Acc: {val_eq_accuracy_pct:.2f}% (Total Eq: {int(val_target_accum)})\n"
+    stmt += f"  ERRORS -> REV1: {val_rev1_errors_pct:.2f}% ({int(val_rev1_errors)}/{val_rev1_total}), MATH1: {val_math1_errors_pct:.2f}% ({int(val_math1_errors)}/{val_math1_total}), REV2: {val_rev2_errors_pct:.2f}% ({int(val_rev2_errors)}/{val_rev2_total}), MATH2: {val_math2_errors_pct:.2f}% ({int(val_math2_errors)}/{val_math2_total}), ANS: {val_ans_errors_pct:.2f}% ({int(val_ans_errors)}/{val_ans_total})\n"
+    stmt += f"  PPL: {val_perplexity:.2f}"
+    print(stmt)
     
     model.train()
-    return val_loss_accum, val_perplexity, val_eq_accuracy_pct, val_rev_accuracy_pct, val_math_accuracy_pct, val_ans_accuracy_pct
+    return val_loss_accum, val_perplexity, val_eq_accuracy_pct, val_rev1_errors_pct, val_math1_errors_pct, val_rev2_errors_pct, val_math2_errors_pct, val_ans_errors_pct
 
 def run_generation_validation(model, val_loader, device, step, num_batches=4):
     """
@@ -412,7 +457,7 @@ def train_rpn_llm(start_step=0, checkpoint_path=None, model_type="rope", max_ste
             print(f"Step {step+1}, Loss: {loss_accum.item():.4f}, lr: {lr:.4e}, norm: {norm:.4f}, Time: {dt:.2f}ms, Tokens per second: {tokens_per_sec:.2f}")
 
         if (step+1) % 1000 == 0:
-            val_loss_accum, val_perplexity, val_eq_acc, val_rev_acc, val_math_acc, val_ans_acc = run_teacher_forcing_validation(model, val_loader, device, step)
+            val_loss_accum, val_perplexity, val_eq_acc, val_rev1_err, val_math1_err, val_rev2_err, val_math2_err, val_ans_err = run_teacher_forcing_validation(model, val_loader, device, step)
        
         if (step+1) % 10 == 0:
             log_dict = {
@@ -426,9 +471,11 @@ def train_rpn_llm(start_step=0, checkpoint_path=None, model_type="rope", max_ste
                 log_dict["val_loss"] = val_loss_accum
                 log_dict["val_perplexity"] = val_perplexity
                 log_dict["val_equation_accuracy"] = val_eq_acc
-                log_dict["val_rev_accuracy"] = val_rev_acc
-                log_dict["val_math_accuracy"] = val_math_acc
-                log_dict["val_ans_accuracy"] = val_ans_acc
+                log_dict["val_rev1_error_pct"] = val_rev1_err
+                log_dict["val_math1_error_pct"] = val_math1_err
+                log_dict["val_rev2_error_pct"] = val_rev2_err
+                log_dict["val_math2_error_pct"] = val_math2_err
+                log_dict["val_ans_error_pct"] = val_ans_err
             wandb.log(log_dict, step=step+1)
     
         if (step+1) % 8000 == 0:

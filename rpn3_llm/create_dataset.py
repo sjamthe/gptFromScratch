@@ -123,7 +123,7 @@ def generate_example():
         prompt += f" {n3}{op2}?"
         reversal += f"[SEP]{rev3}{op2}="
         
-        transition = f" {rev3}{op2}="
+        transition = f"[SEP]{rev3}{op2}="
         
         # Math 2
         math2, ans2_val, ans2_true = generate_math_steps(ans1_val, n3, op2, int(ans1_true), int(n3))

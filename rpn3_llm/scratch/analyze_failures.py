@@ -2,7 +2,8 @@ import os
 import re
 from collections import Counter
 
-failures_file = "/Users/sjamthe/Documents/GithubRepos/gptFromScratch/rpn3_llm/results/ut0.7M_2l_8h_256e_mlp3_phaseMask_True_rpn3_3num_56000_failures.txt"
+failures_file = "/Users/sjamthe/Documents/GithubRepos/gptFromScratch/rpn3_llm/results/ut0.7M_2l_8h_256e_mlp3_phaseMask_True_rpn3_3num_104000_failures.txt"
+
 
 if not os.path.exists(failures_file):
     print(f"File not found: {failures_file}")
@@ -26,17 +27,17 @@ with open(failures_file, "r", encoding="utf-8") as f:
         
         for p in parts:
             if p.startswith("Exp Rev:"):
-                exp_rev = p[len("Exp Rev:"):].strip()
+                exp_rev = p[len("Exp Rev:"):]
             elif p.startswith("Pred Rev:"):
-                pred_rev = p[len("Pred Rev:"):].strip()
+                pred_rev = p[len("Pred Rev:"):]
             elif p.startswith("Exp Math:"):
-                exp_math = p[len("Exp Math:"):].strip()
+                exp_math = p[len("Exp Math:"):]
             elif p.startswith("Pred Math:"):
-                pred_math = p[len("Pred Math:"):].strip()
+                pred_math = p[len("Pred Math:"):]
             elif p.startswith("Exp Ans:"):
-                exp_ans = p[len("Exp Ans:"):].strip()
+                exp_ans = p[len("Exp Ans:"):]
             elif p.startswith("Pred Ans:"):
-                pred_ans = p[len("Pred Ans:"):].strip()
+                pred_ans = p[len("Pred Ans:"):]
                 
         # 1. Check 1st REV
         if exp_rev != pred_rev:
