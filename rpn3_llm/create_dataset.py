@@ -121,7 +121,7 @@ def generate_example():
         
         # Append to prompt and reversal
         prompt += f" {n3}{op2}?"
-        reversal += f"{rev3}{op2}="
+        reversal += f"[SEP]{rev3}{op2}="
         
         transition = f" {rev3}{op2}="
         
