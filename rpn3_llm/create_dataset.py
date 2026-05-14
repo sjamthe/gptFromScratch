@@ -8,9 +8,16 @@ def generate_number(length):
 def reverse_string(s):
     return s[::-1]
 
-def generate_math_steps(a_str, b_str, op, a_true, b_true):
+def generate_math_steps(a_str, b_str, op, a_true, b_true, is_a_negative=False):
     a_rev, b_rev = a_str[::-1], b_str[::-1]
-    max_len = max(len(a_rev), len(b_rev))
+    
+    if op == '+':
+        ans = a_true + b_true
+    elif op == '-':
+        ans = a_true - b_true
+        
+    target_len = len(str(abs(ans)))
+    max_len = max(len(a_rev), len(b_rev), target_len)
     
     steps = []
     carry = 0
@@ -18,7 +25,7 @@ def generate_math_steps(a_str, b_str, op, a_true, b_true):
     
     if op == '+':
         for i in range(max_len):
-            d_a = int(a_rev[i]) if i < len(a_rev) else 0
+            d_a = int(a_rev[i]) if i < len(a_rev) else (9 if is_a_negative else 0)
             d_b = int(b_rev[i]) if i < len(b_rev) else 0
             res = d_a + d_b + carry
             new_carry = res // 10
@@ -27,15 +34,9 @@ def generate_math_steps(a_str, b_str, op, a_true, b_true):
             derived_digits.append(str(digit))
             carry = new_carry
             
-        if carry > 0:
-            steps.append(f"0+0+{carry}={carry}")
-            derived_digits.append(str(carry))
-            
-        ans = a_true + b_true
-        
     elif op == '-':
         for i in range(max_len):
-            d_a = int(a_rev[i]) if i < len(a_rev) else 0
+            d_a = int(a_rev[i]) if i < len(a_rev) else (9 if is_a_negative else 0)
             d_b = int(b_rev[i]) if i < len(b_rev) else 0
             
             res = (d_a - carry) - d_b
@@ -48,8 +49,6 @@ def generate_math_steps(a_str, b_str, op, a_true, b_true):
             steps.append(f"{d_a}-{d_b}-{carry}={res}")
             derived_digits.append(str(res))
             carry = new_carry
-            
-        ans = a_true - b_true
         
     scratchpad_math = ":".join(steps)
     
@@ -123,10 +122,10 @@ def generate_example():
         prompt += f" {n3}{op2}?"
         reversal += f"[SEP]{rev3}{op2}="
         
-        transition = f" {rev3}{op2}="
+        transition = f"[SEP]{rev3}{op2}="
         
         # Math 2
-        math2, ans2_val, ans2_true = generate_math_steps(ans1_val, n3, op2, int(ans1_true), int(n3))
+        math2, ans2_val, ans2_true = generate_math_steps(ans1_val, n3, op2, int(ans1_true), int(n3), is_a_negative=(int(ans1_true) < 0))
         
         # Final Answer
         ans_line = f"[ANS]{ans2_true}[EOS]"
