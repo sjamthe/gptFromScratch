@@ -8,57 +8,91 @@ def generate_number(length):
 def reverse_string(s):
     return s[::-1]
 
-def generate_math_steps(a_str, b_str, op, a_true, b_true, is_a_negative=False):
-    a_rev, b_rev = a_str[::-1], b_str[::-1]
+def generate_math_steps(a_str, b_str, op):
+    a_true = int(a_str)
+    b_true = int(b_str)
+    is_a_negative = a_true < 0
+    is_b_negative = b_true < 0
+    
+    a_mag_rev = a_str.lstrip('-')[::-1]
+    b_mag_rev = b_str.lstrip('-')[::-1]
+    
+    """ If number is negative find 1st non zero digit (in reverse string)
+        for that digit replace it with 10s complement and for remaining digits 
+        replace them with 9s complement
+    """
+    def to_10s_comp_rev(mag_rev):
+        comp_rev = []
+        found_nonzero = False
+        for d_str in mag_rev:
+            d = int(d_str)
+            if not found_nonzero:
+                if d == 0:
+                    comp_rev.append('0')
+                else:
+                    comp_rev.append(str(10 - d))
+                    found_nonzero = True
+            else:
+                comp_rev.append(str(9 - d))
+        return comp_rev
+
+    a_rev = to_10s_comp_rev(a_mag_rev) if is_a_negative else list(a_mag_rev)
+    b_rev = to_10s_comp_rev(b_mag_rev) if is_b_negative else list(b_mag_rev)
+    
+    max_len = max(len(a_rev), len(b_rev))
     
     if op == '+':
         ans = a_true + b_true
     elif op == '-':
         ans = a_true - b_true
         
-    target_len = len(str(abs(ans)))
-    max_len = max(len(a_rev), len(b_rev), target_len)
-    
     steps = []
     carry = 0
     derived_digits = []
     
-    if op == '+':
-        for i in range(max_len):
-            d_a = int(a_rev[i]) if i < len(a_rev) else (9 if is_a_negative else 0)
-            d_b = int(b_rev[i]) if i < len(b_rev) else 0
+    i = 0
+    while True:
+        is_exhausted = i >= max_len
+        
+        d_a = int(a_rev[i]) if i < len(a_rev) else (9 if is_a_negative else 0)
+        d_b = int(b_rev[i]) if i < len(b_rev) else (9 if is_b_negative else 0)
+        
+        if op == '+':
             res = d_a + d_b + carry
-            new_carry = res // 10
             digit = res % 10
+            new_carry = res // 10
+            
+            if is_exhausted and new_carry == carry:
+                break
+                
             steps.append(f"{d_a}+{d_b}+{carry}={digit}")
-            derived_digits.append(str(digit))
-            carry = new_carry
             
-    elif op == '-':
-        for i in range(max_len):
-            d_a = int(a_rev[i]) if i < len(a_rev) else (9 if is_a_negative else 0)
-            d_b = int(b_rev[i]) if i < len(b_rev) else 0
-            
+        elif op == '-':
             res = (d_a - carry) - d_b
             if res < 0:
                 res += 10
                 new_carry = 1
             else:
                 new_carry = 0
+            digit = res
+            
+            if is_exhausted and new_carry == carry:
+                break
                 
-            steps.append(f"{d_a}-{d_b}-{carry}={res}")
-            derived_digits.append(str(res))
-            carry = new_carry
+            steps.append(f"{d_a}-{d_b}-{carry}={digit}")
+            
+        derived_digits.append(str(digit))
+        carry = new_carry
+        i += 1
         
     scratchpad_math = ":".join(steps)
     
-    if ans >= 0:
+    if digit == 0:
         # Positive answer
         steps_str = scratchpad_math + ":[BORROW]0|+"
         ans_rev = "".join(derived_digits)
-        ans_val_str = ans_rev[::-1]
+        ans_str = str(int(ans_rev[::-1]))
         full_math_str = f"[MATH]{steps_str}[REV]{ans_rev}"
-        return full_math_str, ans_val_str, str(ans)
     else:
         # Negative answer
         steps_part2 = ["[BORROW]1|-"]
@@ -81,144 +115,109 @@ def generate_math_steps(a_str, b_str, op, a_true, b_true, is_a_negative=False):
                 tens_comp_digits.append(str(comp))
         
         steps_str = ":".join([scratchpad_math] + steps_part2)
-        ans_rev = "".join(tens_comp_digits)
-        
-        # Add negative sign to the reversed answer
-        ans_rev = "-" + ans_rev
-            
-        # For Math 2, we need the COMPLEMENT (derived_digits), NOT the magnitude!
-        ans_val_str = "".join(derived_digits)[::-1] 
+        ans_rev = "-" + "".join(tens_comp_digits)
+        ans_str = str(int("-" + "".join(tens_comp_digits)[::-1]))
         full_math_str = f"[MATH]{steps_str}[REV]{ans_rev}"
-        return full_math_str, ans_val_str, str(ans)
+        
+    assert int(ans_str) == ans, f"Math logic failure: scratchpad derived {ans_str}, expected {ans}"
+    return full_math_str, ans_str
 
-def generate_example():
-    # 50% chance of 2 numbers or 3 numbers
-    is_3_number = random.random() < 0.5
+def generate_example(max_numbers=3):
+    num_count = random.randint(2, max_numbers)
     
     # Generate random lengths from 1 to 22
-    l1 = random.randint(1, 22)
-    l2 = random.randint(1, 22)
+    lengths = [random.randint(1, 22) for _ in range(num_count)]
+    numbers = [generate_number(l) for l in lengths]
+    ops = [random.choice(['+', '-']) for _ in range(num_count - 1)]
     
-    n1 = generate_number(l1)
-    n2 = generate_number(l2)
-    op1 = random.choice(['+', '-'])
+    # Phase 1: Prompt & Reversal
+    prompt = f"[BOS]{numbers[0]}"
+    for i in range(1, num_count):
+        prompt += f" {numbers[i]}{ops[i-1]}"
+    prompt += "?"
     
-    # Prompt and Reversal for the first 2 numbers
-    prompt = f"[BOS]{n1} {n2}{op1}"
-    rev1 = reverse_string(n1)
-    rev2 = reverse_string(n2)
-    reversal = f"[REV]{rev1} {rev2}{op1}"
+    rev_numbers = [reverse_string(n) for n in numbers]
+    reversal = f"[REV]{rev_numbers[0]}"
+    for i in range(1, num_count):
+        reversal += f"[SEP]{rev_numbers[i]}{ops[i-1]}"
+    reversal += "="
     
-    # Math 1
-    math1, ans1_val, ans1_true = generate_math_steps(n1, n2, op1, int(n1), int(n2))
+    # Phase 2: Math Loop
+    current_val_str = numbers[0]
+    math_phases = []
     
-    if is_3_number:
-        l3 = random.randint(1, 22)
-        n3 = generate_number(l3)
-        op2 = random.choice(['+', '-'])
-        rev3 = reverse_string(n3)
+    for i in range(1, num_count):
+        next_num_str = numbers[i]
+        op = ops[i-1]
         
-        # Append to prompt and reversal
-        prompt += f" {n3}{op2}?"
-        reversal += f"[SEP]{rev3}{op2}="
+        math_str, current_true_str = generate_math_steps(current_val_str, next_num_str, op)
+        current_val_str = current_true_str # For the next step!
         
-        transition = f"[SEP]{rev3}{op2}="
+        # Build tail
+        tail = ""
+        for j in range(i+1, num_count):
+            tail += f"[SEP]{rev_numbers[j]}{ops[j-1]}"
         
-        # Math 2
-        math2, ans2_val, ans2_true = generate_math_steps(ans1_val, n3, op2, int(ans1_true), int(n3), is_a_negative=(int(ans1_true) < 0))
+        if tail == "":
+            transition = "[ANS]"
+        else:
+            transition = tail + "="
+            
+        math_phases.append(math_str + transition)
         
-        # Final Answer
-        ans_line = f"[ANS]{ans2_true}[EOS]"
-        
-        full_line = f"{prompt}{reversal}{math1}{transition}{math2}{ans_line}"
-        return full_line, True, len(prompt)
-    else:
-        prompt += "?"
-        reversal += "="
-        ans_line = f"[ANS]{ans1_true}[EOS]"
-        
-        full_line = f"{prompt}{reversal}{math1}{ans_line}"
-        return full_line, False, len(prompt)
+    full_math_sequence = "".join(math_phases)
+    
+    # Phase 3: Final Answer
+    ans_line = f"{current_val_str}[EOS]"
+    
+    full_line = f"{prompt}{reversal}{full_math_sequence}{ans_line}"
+    return full_line, num_count, len(prompt)
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--samples", type=int, default=100000)
     parser.add_argument("--output_dir", type=str, default="data")
-    parser.add_argument("--split_type", action="store_true", help="Split into 2num and 3num files")
+    parser.add_argument("--split_type", action="store_true", help="Split into num_count files")
     parser.add_argument("--split_length", action="store_true", help="Split into le25 and gt25 files")
+    parser.add_argument("--max_numbers", type=int, default=3, help="Maximum number of operands")
     args = parser.parse_args()
     
     os.makedirs(args.output_dir, exist_ok=True)
     
-    # Base files
-    files_to_open = {
-        "train": os.path.join(args.output_dir, "rpn3_train.txt"),
-        "val": os.path.join(args.output_dir, "rpn3_val.txt")
-    }
-    
-    if args.split_type:
-        files_to_open.update({
-            "train_2num": os.path.join(args.output_dir, "rpn3_2num_train.txt"),
-            "train_3num": os.path.join(args.output_dir, "rpn3_3num_train.txt"),
-            "val_2num": os.path.join(args.output_dir, "rpn3_2num_val.txt"),
-            "val_3num": os.path.join(args.output_dir, "rpn3_3num_val.txt")
-        })
-        
-    if args.split_length:
-        files_to_open.update({
-            "train_le25": os.path.join(args.output_dir, "rpn3_le25_train.txt"),
-            "train_gt25": os.path.join(args.output_dir, "rpn3_gt25_train.txt"),
-            "val_le25": os.path.join(args.output_dir, "rpn3_le25_val.txt"),
-            "val_gt25": os.path.join(args.output_dir, "rpn3_gt25_val.txt")
-        })
-        
-    if args.split_type and args.split_length:
-        files_to_open.update({
-            "train_3num_le25": os.path.join(args.output_dir, "rpn3_3num_le25_train.txt"),
-            "train_3num_gt25": os.path.join(args.output_dir, "rpn3_3num_gt25_train.txt"),
-            "val_3num_le25": os.path.join(args.output_dir, "rpn3_3num_le25_val.txt"),
-            "val_3num_gt25": os.path.join(args.output_dir, "rpn3_3num_gt25_val.txt")
-        })
-        
-    # Open all needed files
     handles = {}
-    for key, path in files_to_open.items():
-        handles[key] = open(path, "w", encoding="utf-8")
-        
+    handles["train"] = open(os.path.join(args.output_dir, "rpn3_train.txt"), "w", encoding="utf-8")
+    handles["val"] = open(os.path.join(args.output_dir, "rpn3_val.txt"), "w", encoding="utf-8")
+    
     print(f"Generating {args.samples} samples...")
     
     train_pct = 0.9
     num_train = int(args.samples * train_pct)
     
     for i in range(args.samples):
-        example, is_3, length = generate_example()
+        example, num_count, length = generate_example(args.max_numbers)
         is_train = i < num_train
         
-        # Write to base files
         prefix = "train" if is_train else "val"
         handles[prefix].write(example + "\n")
         
-        # Write to type files
         if args.split_type:
-            type_suffix = "3num" if is_3 else "2num"
-            handles[f"{prefix}_{type_suffix}"].write(example + "\n")
+            key = f"{prefix}_{num_count}num"
+            if key not in handles:
+                handles[key] = open(os.path.join(args.output_dir, f"rpn3_{num_count}num_{prefix}.txt"), "w", encoding="utf-8")
+            handles[key].write(example + "\n")
             
-        # Write to length files
         if args.split_length:
             len_suffix = "le25" if length <= 25 else "gt25"
-            handles[f"{prefix}_{len_suffix}"].write(example + "\n")
-            
-        # Write to specific 3num + length files
-        if args.split_type and args.split_length and is_3:
-            len_suffix = "le25" if length <= 25 else "gt25"
-            handles[f"{prefix}_3num_{len_suffix}"].write(example + "\n")
+            key = f"{prefix}_{len_suffix}"
+            if key not in handles:
+                handles[key] = open(os.path.join(args.output_dir, f"rpn3_{len_suffix}_{prefix}.txt"), "w", encoding="utf-8")
+            handles[key].write(example + "\n")
             
         if (i + 1) % 10000 == 0:
             print(f"  Generated {i+1}/{args.samples}...")
             
-    # Close all files
-    for handle in handles.values():
-        handle.close()
+    for h in handles.values():
+        h.close()
         
     print(f"Done! Datasets saved to {args.output_dir}")
 

@@ -16,3 +16,4 @@ results/
 RPN-LLM/test_tok.py
 scratch.py
 test_len.py
+test_data/
