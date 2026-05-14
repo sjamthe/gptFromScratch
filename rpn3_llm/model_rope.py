@@ -23,6 +23,7 @@ class GPTConfig:
     bos_token_id: int = 2
     phase_token_ids: list = None
     tau: float = 1.0 # sharpness of attention
+    use_rezero: bool = False # if True, use learned scalar for residuals
 
 # --- RoPE Implementation ---
 def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0):
@@ -317,23 +318,32 @@ class Block(nn.Module):
         if self.use_gated_residual:
             self.attn_gate_proj = nn.Linear(config.n_embd, config.n_embd)
             self.mlp_gate_proj = nn.Linear(config.n_embd, config.n_embd)
+        
+        self.use_rezero = getattr(config, 'use_rezero', False)
+        if self.use_rezero:
+            self.attn_alpha = nn.Parameter(torch.zeros(1))
+            self.mlp_alpha = nn.Parameter(torch.zeros(1))
     
     def forward(self, x: torch.Tensor, freqs_cis: torch.Tensor, use_cache: bool = False, cache_state: tuple = None, return_attention: bool = False, attn_mask: torch.Tensor = None, head_mask: torch.Tensor = None) -> tuple:
         norm_x_attn = self.ln_1(x)
         attn_out, cache_out, weights = self.attn(norm_x_attn, freqs_cis, use_cache=use_cache, cache_state=cache_state, return_attention=return_attention, attn_mask=attn_mask, head_mask=head_mask)
         
-        if getattr(self, 'use_gated_residual', False):
+        if self.use_gated_residual:
             attn_gate = torch.sigmoid(self.attn_gate_proj(norm_x_attn))
             x = x + attn_gate * attn_out
+        elif self.use_rezero:
+            x = x + self.attn_alpha * attn_out
         else:
             x = x + attn_out
             
         norm_x_mlp = self.ln_2(x)
         mlp_out = self.mlp(norm_x_mlp)
         
-        if getattr(self, 'use_gated_residual', False):
+        if self.use_gated_residual:
             mlp_gate = torch.sigmoid(self.mlp_gate_proj(norm_x_mlp))
             x = x + mlp_gate * mlp_out
+        elif self.use_rezero:
+            x = x + self.mlp_alpha * mlp_out
         else:
             x = x + mlp_out
             

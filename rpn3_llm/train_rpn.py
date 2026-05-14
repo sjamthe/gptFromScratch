@@ -204,7 +204,7 @@ def run_generation_validation(model, val_loader, device, step, num_batches=4):
     model.eval()
     total_correct = 0
     total_equations = 0
-    max_new_tokens = 256
+    max_new_tokens = 512
     
     with torch.no_grad():
         for _ in range(num_batches):
@@ -274,7 +274,7 @@ def run_generation_validation(model, val_loader, device, step, num_batches=4):
     model.train()
     return gen_accuracy_pct
 
-def train_rpn_llm(start_step=0, checkpoint_path=None, model_type="rope", max_steps=80000, dataset_prefix="1-22_uniform_BOS", use_phase_mask=True, mlp_ratio=4, tau=1.0, use_gated_residual=False, use_mohsa=False, rope_theta=10000.0, use_recency_bias=False, weight_decay=0.1):
+def train_rpn_llm(start_step=0, checkpoint_path=None, model_type="rope", max_steps=80000, dataset_prefix="1-22_uniform_BOS", use_phase_mask=True, mlp_ratio=4, tau=1.0, use_gated_residual=False, use_mohsa=False, rope_theta=10000.0, use_recency_bias=False, weight_decay=0.1, use_rezero=False):
     device = 'cuda' if torch.cuda.is_available() else 'mps' if torch.backends.mps.is_available() else 'cpu'
     print(f"Using device: {device}")
 
@@ -335,9 +335,9 @@ def train_rpn_llm(start_step=0, checkpoint_path=None, model_type="rope", max_ste
         if model_type == "rdt":
             config = GPTConfig(vocab_size=64, n_prelude=1, n_coda=1, n_layer=6, n_head=8, n_embd=512, block_size=2048)
         elif model_type == "ut":
-            config = GPTConfig(vocab_size=64, n_layer=2, n_head=8, n_embd=256, block_size=2048, universal=True, tau=tau, use_phase_mask=use_phase_mask, mlp_ratio=mlp_ratio, use_gated_residual=use_gated_residual, use_mohsa=use_mohsa, rope_theta=rope_theta, use_recency_bias=use_recency_bias, bos_token_id=bos_id, phase_token_ids=phase_token_ids)
+            config = GPTConfig(vocab_size=64, n_layer=2, n_head=8, n_embd=384, block_size=2048, universal=True, tau=tau, use_phase_mask=use_phase_mask, mlp_ratio=mlp_ratio, use_gated_residual=use_gated_residual, use_mohsa=use_mohsa, rope_theta=rope_theta, use_recency_bias=use_recency_bias, bos_token_id=bos_id, phase_token_ids=phase_token_ids, use_rezero=use_rezero)
         elif model_type == "rope":
-            config = GPTConfig(vocab_size=64, n_layer=2, n_head=6, n_embd=192, block_size=2048, universal=False, use_phase_mask=use_phase_mask, mlp_ratio=mlp_ratio, use_gated_residual=use_gated_residual, use_mohsa=use_mohsa, bos_token_id=bos_id, phase_token_ids=phase_token_ids)
+            config = GPTConfig(vocab_size=64, n_layer=2, n_head=6, n_embd=192, block_size=2048, universal=False, use_phase_mask=use_phase_mask, mlp_ratio=mlp_ratio, use_gated_residual=use_gated_residual, use_mohsa=use_mohsa, bos_token_id=bos_id, phase_token_ids=phase_token_ids, use_rezero=use_rezero)
 
     model = GPT(config)
     model.to(device)
@@ -368,6 +368,8 @@ def train_rpn_llm(start_step=0, checkpoint_path=None, model_type="rope", max_ste
         model_prefix += f"_wt{weight_decay}"
     if tau != 1.0:
         model_prefix += f"_tau{tau}"
+    if getattr(config, 'use_rezero', False):
+        model_prefix += "_rezero"
     run_name = f"{model_prefix}_{dataset_prefix}"
 
     if device == 'cuda':
@@ -375,10 +377,10 @@ def train_rpn_llm(start_step=0, checkpoint_path=None, model_type="rope", max_ste
     print(f"Initialized {model_type.upper()} Model: {model_prefix}")
     print(f"Total Parameters: {num_params:,}")
     
-    max_lr = 1e-4
+    max_lr = 3e-4
+    lr_decay_steps = 200000
     min_lr = max_lr * 0.1
     warmup_steps = 1000
-    lr_decay_steps = 62277
     
     def get_lr(it):
         if it < warmup_steps:
@@ -512,8 +514,9 @@ if __name__ == "__main__":
     parser.add_argument("--rope_theta", type=float, default=10000.0, help="Base for RoPE frequencies")
     parser.add_argument("--use_recency_bias", action="store_true", help="Enable relative position bias for recency")
     parser.add_argument("--weight_decay", type=float, default=0.1, help="Weight decay for AdamW (default 0.1)")
+    parser.add_argument("--reZero", action="store_true", dest="use_rezero", help="Enable ReZero (learned scalars for residuals)")
     parser.set_defaults(use_phase_mask=True)
     
     args = parser.parse_args()
         
-    train_rpn_llm(args.start_step, args.checkpoint_path, args.model, args.max_steps, args.dataset, args.use_phase_mask, args.mlp_ratio, args.tau, args.use_gated_residual, args.use_mohsa, args.rope_theta, args.use_recency_bias, args.weight_decay)
+    train_rpn_llm(args.start_step, args.checkpoint_path, args.model, args.max_steps, args.dataset, args.use_phase_mask, args.mlp_ratio, args.tau, args.use_gated_residual, args.use_mohsa, args.rope_theta, args.use_recency_bias, args.weight_decay, args.use_rezero)

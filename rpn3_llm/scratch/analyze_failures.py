@@ -2,7 +2,7 @@ import os
 import re
 from collections import Counter
 
-failures_file = "/Users/sjamthe/Documents/GithubRepos/gptFromScratch/rpn3_llm/results/ut0.7M_2l_8h_256e_mlp3_phaseMask_True_rpn3_3num_176000_failures.txt"
+failures_file = "/Users/sjamthe/Documents/GithubRepos/gptFromScratch/rpn3_llm/results/ut1.5M_2l_8h_384e_mlp3_phaseMask_True_rpn3_3num_216000_failures.txt"
 
 
 if not os.path.exists(failures_file):
@@ -78,6 +78,7 @@ with open(failures_file, "r", encoding="utf-8") as f:
                     # pred2 "95858653363661696357-=" contains operator  just get the number part without -=
                     pred2 = pred2[:-2] # remove -=
                     
+                    """
                     if ex1 != pred1:
                         print(f"EXP N1: {ex1}")
                         print(f"PRD N1: {pred1}")
@@ -90,6 +91,7 @@ with open(failures_file, "r", encoding="utf-8") as f:
                             print(f"PRD N2: {pred2}")
                         else:
                             print("REV2 matches after sorting ")
+                    """
                 else:
                     # 4. Check 2nd MATH
                     exp_m2 = exp_m_parts[1] if len(exp_m_parts) >= 2 else ""
@@ -99,11 +101,20 @@ with open(failures_file, "r", encoding="utf-8") as f:
                     pred_steps2 = pred_m2.split("[REV]")[0]
                     
                     if exp_steps2 != pred_steps2:
+                        print(f"{total_lines}: EXP MATH2: {exp_steps2}")
+                        print(f"{total_lines}: PRD MATH2: {pred_steps2}")
                         phase_failures["2nd MATH"] += 1
                     else:
                         # 5. Check ANS
                         if exp_ans != pred_ans:
                             phase_failures["ANS"] += 1
+                            ex_sorted = "".join(sorted(exp_ans))
+                            pred_sorted = "".join(sorted(pred_ans))
+                            if ex_sorted != pred_sorted:
+                                print(f"EXP ANS: {exp_ans.strip()}")
+                                print(f"PRD ANS: {pred_ans.strip()}")
+                            else:
+                                print("ANS matches after sorting ")
                         else:
                             # It might be a line that is NOT a failure (ie header line) but was in the file?
                             phase_failures["UNKNOWN"] += 1
