@@ -2,7 +2,7 @@ import os
 import re
 from collections import Counter
 
-failures_file = "/Users/sjamthe/Documents/GithubRepos/gptFromScratch/rpn3_llm/results/ut1.5M_2l_8h_384e_mlp3_phaseMask_True_rpn3_3num_216000_failures.txt"
+failures_file = "/Users/sjamthe/Documents/GithubRepos/gptFromScratch/rpn3_llm/results/ut1.5M_2l_8h_384e_mlp3_phaseMask_True_rpn3_240000_failures.txt"
 
 
 if not os.path.exists(failures_file):
@@ -64,21 +64,21 @@ with open(failures_file, "r", encoding="utf-8") as f:
                     phase_failures["2nd REV"] += 1
                     # separate ex_rev2, pred_rev2 into 2 numbers and rest and compare each
                     # print which one fails
-                    ex_parts = exp_rev2.split(" ")
-                    pred_parts = pred_rev2.split(" ")
+                    ex_parts = exp_rev2.split("[SEP]")
+                    pred_parts = pred_rev2.split("[SEP]")
                     
                     ex1 = ex_parts[0]
                     ex2 = ex_parts[1] if len(ex_parts) >= 2 else ""
-                    # ex2 "94546618831-=" contains operator  just get the number part without -=
-                    # operator is always the last 2 chars   
-                    ex2 = ex2[:-2] # remove -=
+                    # ex2 contains operator just get the number part without operator
+                    # operator is always the last 2 chars for e.g. += or -= 
+                    if len(ex2) >= 2 and ex2[-1] in ['+', '-', '=']:
+                        ex2 = ex2.rstrip("+-=")
                     
                     pred1 = pred_parts[0]
                     pred2 = pred_parts[1] if len(pred_parts) >= 2 else ""
-                    # pred2 "95858653363661696357-=" contains operator  just get the number part without -=
-                    pred2 = pred2[:-2] # remove -=
+                    if len(pred2) >= 2 and pred2[-1] in ['+', '-', '=']:
+                        pred2 = pred2.rstrip("+-=")
                     
-                    """
                     if ex1 != pred1:
                         print(f"EXP N1: {ex1}")
                         print(f"PRD N1: {pred1}")
@@ -91,7 +91,6 @@ with open(failures_file, "r", encoding="utf-8") as f:
                             print(f"PRD N2: {pred2}")
                         else:
                             print("REV2 matches after sorting ")
-                    """
                 else:
                     # 4. Check 2nd MATH
                     exp_m2 = exp_m_parts[1] if len(exp_m_parts) >= 2 else ""

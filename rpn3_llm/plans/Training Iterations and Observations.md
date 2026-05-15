@@ -1,4 +1,4 @@
-# Training Iterations and Observations
+# Training Iterations and Observations for 3num math
 
 ## Iteration 1
 
@@ -143,3 +143,14 @@ We found problems in data generation script. Negative number additions were fail
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | 3-num  | 216000| 97.66%  | 14 | 12 | 43 | 100 | 30 |
 
+## iteration 9
+Model 8 did perfect after we fixed the data generation script. We also fixed create_dataset.py to use "[SEP]" between num1 & num2, this model got 100% correcct at 240k snapshot
+ut1.5M_2l_8h_384e_mlp3_phaseMask_True_rpn3_240000.pt
+
+| Data Type | Steps | Total Accuracy% | REV1 Errors | MATH1 Errors | REV2 Errors | MATH2 Errors | ANS Errors |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 3-num  | 240000| 97.97%  | 173 | 0 | 0 | 0 | 0 |
+
+3-num: Total: 8521 | Correct: 8348 | Accuracy: 97.97%
+  Failures -> Rev: 173, Math: 0 (Math1: 0, Rev2: 0, Math2: 0), Ans: 0
+## Closing this work and moving to new work of multiple number operations. 

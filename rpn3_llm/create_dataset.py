@@ -122,11 +122,11 @@ def generate_math_steps(a_str, b_str, op):
     assert int(ans_str) == ans, f"Math logic failure: scratchpad derived {ans_str}, expected {ans}"
     return full_math_str, ans_str
 
-def generate_example(max_numbers=3):
+def generate_example(max_numbers=3, max_digits=22):
     num_count = random.randint(2, max_numbers)
     
-    # Generate random lengths from 1 to 22
-    lengths = [random.randint(1, 22) for _ in range(num_count)]
+    # Generate random lengths from 1 to max_digits
+    lengths = [random.randint(1, max_digits) for _ in range(num_count)]
     numbers = [generate_number(l) for l in lengths]
     ops = [random.choice(['+', '-']) for _ in range(num_count - 1)]
     
@@ -180,13 +180,15 @@ def main():
     parser.add_argument("--split_type", action="store_true", help="Split into num_count files")
     parser.add_argument("--split_length", action="store_true", help="Split into le25 and gt25 files")
     parser.add_argument("--max_numbers", type=int, default=3, help="Maximum number of operands")
+    parser.add_argument("--max_digits", type=int, default=22, help="Maximum digits per operand")
+    parser.add_argument("--prefix", type=str, default="rpn3", help="Prefix for output files")
     args = parser.parse_args()
     
     os.makedirs(args.output_dir, exist_ok=True)
     
     handles = {}
-    handles["train"] = open(os.path.join(args.output_dir, "rpn3_train.txt"), "w", encoding="utf-8")
-    handles["val"] = open(os.path.join(args.output_dir, "rpn3_val.txt"), "w", encoding="utf-8")
+    handles["train"] = open(os.path.join(args.output_dir, f"{args.prefix}_train.txt"), "w", encoding="utf-8")
+    handles["val"] = open(os.path.join(args.output_dir, f"{args.prefix}_val.txt"), "w", encoding="utf-8")
     
     print(f"Generating {args.samples} samples...")
     
@@ -194,7 +196,7 @@ def main():
     num_train = int(args.samples * train_pct)
     
     for i in range(args.samples):
-        example, num_count, length = generate_example(args.max_numbers)
+        example, num_count, length = generate_example(args.max_numbers, args.max_digits)
         is_train = i < num_train
         
         prefix = "train" if is_train else "val"

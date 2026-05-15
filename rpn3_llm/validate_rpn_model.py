@@ -162,7 +162,7 @@ def validate_model(checkpoint_path, test_file_path, output_fail_path, arch=None,
         '3-num': {'total': 0, 'correct': 0, 'reversal_failed': 0, 'math_failed': 0, 'only_final_ans_failed': 0, 'math1_failed': 0, 'math2_failed': 0, 'rev2_failed': 0}
     }
     reversal_fail_by_spaces = defaultdict(int) # Key: (s1_len, s2_len)
-    reversal_pos_failures = {'num1': 0, 'num2': 0, 'num3': 0, 'both': 0, 'malformed': 0}
+    reversal_pos_failures = defaultdict(int) # Dynamically tracks num1, num2, etc.
     reversal_digit_failures = defaultdict(int) # Key: num_digits
 
     total_items = sum(len(items) for items in length_groups.values())
@@ -396,51 +396,33 @@ def validate_model(checkpoint_path, test_file_path, output_fail_path, arch=None,
                         
                         # Analyze WHICH number failed in the reversal
                         try:
-                            exp_rev_m = re.search(r"(\d+)\s+(\d+)([+\-])(?:(\d+)([+\-]))?=", exp_pre.strip())
-                            pred_rev_m = re.search(r"(\d+)\s+(\d+)([+\-])(?:(\d+)([+\-]))?=", pred_pre.strip())
+                            exp_parts = exp_pre.strip().rstrip('=').split('[SEP]')
+                            pred_parts = pred_pre.strip().rstrip('=').split('[SEP]')
                             
-                            if exp_rev_m and pred_rev_m:
-                                exp_n1 = exp_rev_m.group(1)
-                                exp_n2 = exp_rev_m.group(2)
-                                exp_n3 = exp_rev_m.group(4)
-                                
-                                pred_n1 = pred_rev_m.group(1)
-                                pred_n2 = pred_rev_m.group(2)
-                                pred_n3 = pred_rev_m.group(4)
-                                
-                                n1_fail = exp_n1 != pred_n1
-                                n2_fail = exp_n2 != pred_n2
-                                n3_fail = (exp_n3 != pred_n3) if exp_n3 is not None and pred_n3 is not None else False
-                                
-                                # If exp has 3 numbers but pred doesn't, that's a failure too!
-                                if (exp_n3 is not None) != (pred_n3 is not None):
-                                    n3_fail = True
-                                
-                                fail_count = sum([n1_fail, n2_fail, n3_fail])
-                                fail_str = ""
-                                if fail_count > 1:
-                                    reversal_pos_failures['both'] += 1
-                                    fail_str = "B"
-                                elif n1_fail:
-                                    reversal_pos_failures['num1'] += 1
-                                    fail_str = "1"
-                                elif n2_fail:
-                                    reversal_pos_failures['num2'] += 1
-                                    fail_str = "2"
-                                elif n3_fail:
-                                    reversal_pos_failures['num3'] += 1
-                                    fail_str = "3"
-                                else:
-                                    reversal_pos_failures['malformed'] += 1
-                                    fail_str = "M"
-                                    
-                                # Track digit failures
-                                if n1_fail: reversal_digit_failures[len(exp_n1)] += 1
-                                if n2_fail: reversal_digit_failures[len(exp_n2)] += 1
-                                if n3_fail and exp_n3: reversal_digit_failures[len(exp_n3)] += 1
+                            fail_count = 0
+                            n_fails = []
+                            for i in range(max(len(exp_parts), len(pred_parts))):
+                                e = exp_parts[i] if i < len(exp_parts) else None
+                                p = pred_parts[i] if i < len(pred_parts) else None
+                                if e != p:
+                                    n_fails.append(i)
+                                    fail_count += 1
+                                    if e:
+                                        # e looks like "51" or "51+"
+                                        num_digits = len([c for c in e if c.isdigit()])
+                                        reversal_digit_failures[num_digits] += 1
+                            
+                            if fail_count > 1:
+                                reversal_pos_failures['multiple'] += 1
+                                fail_str = "MULTIPLE"
+                            elif len(n_fails) == 1:
+                                pos = f"num{n_fails[0] + 1}"
+                                reversal_pos_failures[pos] += 1
+                                fail_str = str(n_fails[0] + 1)
                             else:
                                 reversal_pos_failures['malformed'] += 1
-                        except: 
+                                fail_str = "M"
+                        except Exception as e: 
                             reversal_pos_failures['malformed'] += 1
                     
                     elif is_math_fail:
@@ -450,38 +432,42 @@ def validate_model(checkpoint_path, test_file_path, output_fail_path, arch=None,
                         if is_3_num:
                             exp_m_parts = exp_math.split("[MATH]")
                             pred_m_parts = pred_math.split("[MATH]")
-                            if len(exp_m_parts) >= 1:
-                                exp_math1 = exp_m_parts[0].strip()
-                                pred_math1 = pred_m_parts[0].strip() if len(pred_m_parts) >= 1 else ""
-                                if exp_math1 != pred_math1:
-                                    # Split by [REV] to separate MATH1 from REV2
-                                    exp_m1_parts = exp_math1.split("[REV]")
-                                    pred_m1_parts = pred_math1.split("[REV]")
+                            
+                            fail_idx = -1
+                            for i in range(len(exp_m_parts)):
+                                e = exp_m_parts[i].strip()
+                                p = pred_m_parts[i].strip() if i < len(pred_m_parts) else ""
+                                if e != p:
+                                    fail_idx = i
+                                    break
+                            
+                            if fail_idx == 0:
+                                # Differentiate between MATH1 and REV2 inside the first block if there is a [REV]
+                                if "[REV]" in exp_m_parts[0]:
+                                    e_sub = exp_m_parts[0].split("[REV]")
+                                    p_sub = pred_m_parts[0].split("[REV]") if len(pred_m_parts) > 0 else []
                                     
-                                    exp_m1_trace = exp_m1_parts[0].strip() if len(exp_m1_parts) > 0 else ""
-                                    pred_m1_trace = pred_m1_parts[0].strip() if len(pred_m1_parts) > 0 else ""
+                                    e_m1 = e_sub[0].strip()
+                                    p_m1 = p_sub[0].strip() if len(p_sub) > 0 else ""
                                     
-                                    if exp_m1_trace != pred_m1_trace:
+                                    if e_m1 != p_m1:
+                                        type_stats['3-num']['math1_failed'] += 1
                                         math1_fail = True
                                     else:
+                                        type_stats['3-num']['rev2_failed'] += 1
                                         rev2_fail = True
-                            
-                            if len(exp_m_parts) >= 2:
-                                exp_math2 = exp_m_parts[1].strip()
-                                pred_math2 = pred_m_parts[1].strip() if len(pred_m_parts) >= 2 else ""
-                                if exp_math2 != pred_math2:
-                                    math2_fail = True
-                                    
-                            # If pred didn't even generate the second [MATH] but math1 was correct
-                            if len(pred_m_parts) < 2 and not math1_fail:
-                                math2_fail = True
-                                
-                            if math1_fail:
-                                type_stats['3-num']['math1_failed'] += 1
-                            elif rev2_fail:
-                                type_stats['3-num']['rev2_failed'] += 1
-                            elif math2_fail:
+                                else:
+                                    type_stats['3-num']['math1_failed'] += 1
+                                    math1_fail = True
+                            elif fail_idx == 1:
                                 type_stats['3-num']['math2_failed'] += 1
+                                math2_fail = True
+                            elif fail_idx > 1:
+                                type_stats['3-num']['math2_failed'] += 1 # We'll just lump it here for now
+                                math2_fail = True
+                            elif len(pred_m_parts) < len(exp_m_parts):
+                                type_stats['3-num']['math2_failed'] += 1
+                                math2_fail = True
                     
                     elif not matched:
                         failure_categories['only_final_ans_failed'] += 1
