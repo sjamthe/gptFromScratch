@@ -274,7 +274,7 @@ def run_generation_validation(model, val_loader, device, step, num_batches=4):
     model.train()
     return gen_accuracy_pct
 
-def train_rpn_llm(start_step=0, checkpoint_path=None, model_type="rope", max_steps=80000, dataset_prefix="1-22_uniform_BOS", use_phase_mask=True, mlp_ratio=4, tau=1.0, use_gated_residual=False, use_mohsa=False, rope_theta=10000.0, use_recency_bias=False, weight_decay=0.1, use_rezero=False, max_lr=3e-4):
+def train_rpn_llm(start_step=0, checkpoint_path=None, model_type="rope", max_steps=80000, dataset_prefix="1-22_uniform_BOS", use_phase_mask=True, mlp_ratio=4, tau=1.0, use_gated_residual=False, use_mohsa=False, rope_theta=10000.0, use_recency_bias=False, weight_decay=0.1, use_rezero=False, max_lr=3e-4, freeze_embeddings=False, freeze_non_attn=False):
     device = 'cuda' if torch.cuda.is_available() else 'mps' if torch.backends.mps.is_available() else 'cpu'
     print(f"Using device: {device}")
 
@@ -282,8 +282,8 @@ def train_rpn_llm(start_step=0, checkpoint_path=None, model_type="rope", max_ste
     if(torch.cuda.is_available()):
         torch.cuda.manual_seed(1337)
     
-    B = 16
-    T = 768  # Increased to 768 to capture 3 number problems
+    B = 8 # Reduced batch size to accommodate 2048 context on most GPUs
+    T = 2048 # increased for 7 number math problems
     total_batch_size = B*T
     assert total_batch_size % (B * T) == 0, "total_batch_size must be divisible by (B * T)"
     grad_accum_steps = total_batch_size // (B * T)
@@ -321,6 +321,10 @@ def train_rpn_llm(start_step=0, checkpoint_path=None, model_type="rope", max_ste
             print("Loading config from checkpoint...")
             config = checkpoint['config']
             config_in_checkpoint = True
+            # Override rope_theta if explicitly specified
+            if rope_theta != 10000.0:
+                print(f"Overriding rope_theta from checkpoint ({getattr(config, 'rope_theta', 10000.0)}) to {rope_theta}")
+                config.rope_theta = rope_theta
     
     # Get token IDs from tokenizer for phase masking
     tokenizer = RPNTokenizer(os.path.join(script_dir, "rpn-tokenizer.json"))
@@ -335,11 +339,21 @@ def train_rpn_llm(start_step=0, checkpoint_path=None, model_type="rope", max_ste
         if model_type == "rdt":
             config = GPTConfig(vocab_size=64, n_prelude=1, n_coda=1, n_layer=6, n_head=8, n_embd=512, block_size=2048)
         elif model_type == "ut":
-            config = GPTConfig(vocab_size=64, n_layer=2, n_head=8, n_embd=384, block_size=2048, universal=True, tau=tau, use_phase_mask=use_phase_mask, mlp_ratio=mlp_ratio, use_gated_residual=use_gated_residual, use_mohsa=use_mohsa, rope_theta=rope_theta, use_recency_bias=use_recency_bias, bos_token_id=bos_id, phase_token_ids=phase_token_ids, use_rezero=use_rezero)
+            config = GPTConfig(vocab_size=64, n_layer=2, n_head=8, n_embd=384, block_size=2048, universal=True, tau=tau, use_phase_mask=use_phase_mask, mlp_ratio=mlp_ratio, use_gated_residual=use_gated_residual, use_mohsa=use_mohsa, rope_theta=rope_theta, use_recency_bias=use_recency_bias, bos_token_id=bos_id, phase_token_ids=phase_token_ids, use_rezero=use_rezero, freeze_embeddings=freeze_embeddings)
         elif model_type == "rope":
-            config = GPTConfig(vocab_size=64, n_layer=2, n_head=6, n_embd=192, block_size=2048, universal=False, use_phase_mask=use_phase_mask, mlp_ratio=mlp_ratio, use_gated_residual=use_gated_residual, use_mohsa=use_mohsa, bos_token_id=bos_id, phase_token_ids=phase_token_ids, use_rezero=use_rezero)
+            config = GPTConfig(vocab_size=64, n_layer=2, n_head=6, n_embd=192, block_size=2048, universal=False, use_phase_mask=use_phase_mask, mlp_ratio=mlp_ratio, use_gated_residual=use_gated_residual, use_mohsa=use_mohsa, bos_token_id=bos_id, phase_token_ids=phase_token_ids, use_rezero=use_rezero, freeze_embeddings=freeze_embeddings)
 
     model = GPT(config)
+    
+    if freeze_non_attn:
+        print(">>> SFT RECALIBRATION: Freezing all parameters EXCEPT c_attn and c_proj...")
+        for name, param in model.named_parameters():
+            if "c_attn" in name or "c_proj" in name:
+                param.requires_grad = True
+                print(f"  Training: {name}")
+            else:
+                param.requires_grad = False
+
     model.to(device)
     
     # Extract structural params from config for logging (works for both rope and rdt)
@@ -370,6 +384,10 @@ def train_rpn_llm(start_step=0, checkpoint_path=None, model_type="rope", max_ste
         model_prefix += f"_tau{tau}"
     if getattr(config, 'use_rezero', False):
         model_prefix += "_rezero"
+    if getattr(config, 'freeze_embeddings', False):
+        model_prefix += "_frozenEmb"
+    if freeze_non_attn:
+        model_prefix += "_sftRecal"
     run_name = f"{model_prefix}_{dataset_prefix}"
 
     if device == 'cuda':
@@ -377,11 +395,20 @@ def train_rpn_llm(start_step=0, checkpoint_path=None, model_type="rope", max_ste
     print(f"Initialized {model_type.upper()} Model: {model_prefix}")
     print(f"Total Parameters: {num_params:,}")
     
-    lr_decay_steps = 200000
+    lr_decay_steps = 400000
     min_lr = max_lr * 0.1
     warmup_steps = 1000
     
     def get_lr(it):
+        if start_step >= 200000:
+            if it < start_step:
+                return max_lr
+            if it > lr_decay_steps:
+                return min_lr
+            decay_ratio = (it - start_step) / (lr_decay_steps - start_step)
+            coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio))
+            return min_lr + (max_lr - min_lr) * coeff
+            
         if it < warmup_steps:
             return max_lr * (it+1) / warmup_steps
         if it > lr_decay_steps:
@@ -410,7 +437,7 @@ def train_rpn_llm(start_step=0, checkpoint_path=None, model_type="rope", max_ste
     wandb_config.update(dataclasses.asdict(config))
 
     wandb.init(
-        project="rpn3-llm",
+        project="rpnN-llm",
         name=f"{run_name}",
         config=wandb_config
     )
@@ -419,10 +446,18 @@ def train_rpn_llm(start_step=0, checkpoint_path=None, model_type="rope", max_ste
     
     if checkpoint is not None:
         model.load_state_dict(checkpoint['model'])
-        optimizer.load_state_dict(checkpoint['optimizer'])
-        # advance dataloader to the precise step analytically
-        train_loader.current_pos = (start_step * grad_accum_steps * train_loader.B * train_loader.T) % train_loader.num_tokens
-        print(f"Resuming from step {start_step}! Dataloader synced to pos {train_loader.current_pos}")
+        if not freeze_non_attn:
+            try:
+                optimizer.load_state_dict(checkpoint['optimizer'])
+                print("Successfully loaded optimizer state dict from checkpoint!")
+            except ValueError as e:
+                print(f"\n[WARNING] Could not load optimizer state dict: {e}")
+                print(">>> Resuming with a fresh optimizer (momentum states reset to zero) for full model training! <<<\n")
+            # advance dataloader to the precise step analytically
+            train_loader.current_pos = (start_step * grad_accum_steps * train_loader.B * train_loader.T) % train_loader.num_tokens
+            print(f"Resuming from step {start_step}! Dataloader synced to pos {train_loader.current_pos}")
+        else:
+            print(">>> SFT RECALIBRATION: Loaded checkpoint weights. Initialized fresh optimizer for recalibration parameters.")
 
     for step in range(start_step, max_steps):
         t0 = time.time()
@@ -515,8 +550,10 @@ if __name__ == "__main__":
     parser.add_argument("--weight_decay", type=float, default=0.1, help="Weight decay for AdamW (default 0.1)")
     parser.add_argument("--reZero", action="store_true", dest="use_rezero", help="Enable ReZero (learned scalars for residuals)")
     parser.add_argument("--max_lr", type=float, default=3e-4, help="Peak learning rate")
+    parser.add_argument("--freeze_embeddings", action="store_true", help="Freeze embedding weights during training")
+    parser.add_argument("--freeze_non_attn", action="store_true", help="Freeze all layers except c_attn and c_proj for SFT recalibration")
     parser.set_defaults(use_phase_mask=True)
     
     args = parser.parse_args()
-        
-    train_rpn_llm(args.start_step, args.checkpoint_path, args.model, args.max_steps, args.dataset, args.use_phase_mask, args.mlp_ratio, args.tau, args.use_gated_residual, args.use_mohsa, args.rope_theta, args.use_recency_bias, args.weight_decay, args.use_rezero, args.max_lr)
+    
+    train_rpn_llm(args.start_step, args.checkpoint_path, args.model, args.max_steps, args.dataset, args.use_phase_mask, args.mlp_ratio, args.tau, args.use_gated_residual, args.use_mohsa, args.rope_theta, args.use_recency_bias, args.weight_decay, args.use_rezero, args.max_lr, args.freeze_embeddings, args.freeze_non_attn)

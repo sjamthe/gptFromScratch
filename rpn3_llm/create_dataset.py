@@ -1,6 +1,7 @@
 import random
 import os
 import argparse
+from utils import RPNTokenizer
 
 def generate_number(length):
     return "".join([str(random.randint(1, 9)) for _ in range(length)])
@@ -62,7 +63,7 @@ def generate_math_steps(a_str, b_str, op):
             digit = res % 10
             new_carry = res // 10
             
-            if is_exhausted and new_carry == carry:
+            if is_exhausted and new_carry == carry and (len(derived_digits) > 0 and derived_digits[-1] == str(digit)):
                 break
                 
             steps.append(f"{d_a}+{d_b}+{carry}={digit}")
@@ -76,7 +77,7 @@ def generate_math_steps(a_str, b_str, op):
                 new_carry = 0
             digit = res
             
-            if is_exhausted and new_carry == carry:
+            if is_exhausted and new_carry == carry and (len(derived_digits) > 0 and derived_digits[-1] == str(digit)):
                 break
                 
             steps.append(f"{d_a}-{d_b}-{carry}={digit}")
@@ -138,9 +139,10 @@ def generate_example(max_numbers=3, max_digits=22):
     
     rev_numbers = [reverse_string(n) for n in numbers]
     reversal = f"[REV]{rev_numbers[0]}"
-    for i in range(1, num_count):
+    if num_count > 1:
+        reversal += f"[SEP]{rev_numbers[1]}{ops[0]}="
+    for i in range(2, num_count):
         reversal += f"[SEP]{rev_numbers[i]}{ops[i-1]}"
-    reversal += "="
     
     # Phase 2: Math Loop
     current_val_str = numbers[0]
@@ -155,13 +157,15 @@ def generate_example(max_numbers=3, max_digits=22):
         
         # Build tail
         tail = ""
-        for j in range(i+1, num_count):
+        if i + 1 < num_count:
+            tail += f"[SEP]{rev_numbers[i+1]}{ops[i]}="
+        for j in range(i+2, num_count):
             tail += f"[SEP]{rev_numbers[j]}{ops[j-1]}"
         
         if tail == "":
             transition = "[ANS]"
         else:
-            transition = tail + "="
+            transition = tail
             
         math_phases.append(math_str + transition)
         
@@ -176,7 +180,7 @@ def generate_example(max_numbers=3, max_digits=22):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--samples", type=int, default=100000)
-    parser.add_argument("--output_dir", type=str, default="data")
+    parser.add_argument("--output_dir", type=str, default="rpn3_llm/data")
     parser.add_argument("--split_type", action="store_true", help="Split into num_count files")
     parser.add_argument("--split_length", action="store_true", help="Split into le25 and gt25 files")
     parser.add_argument("--max_numbers", type=int, default=3, help="Maximum number of operands")
@@ -191,12 +195,20 @@ def main():
     handles["val"] = open(os.path.join(args.output_dir, f"{args.prefix}_val.txt"), "w", encoding="utf-8")
     
     print(f"Generating {args.samples} samples...")
-    
     train_pct = 0.9
     num_train = int(args.samples * train_pct)
-    
+
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    tokenizer = RPNTokenizer(os.path.join(script_dir, "rpn-tokenizer.json"))
+    max_tokens = 2040
+
     for i in range(args.samples):
-        example, num_count, length = generate_example(args.max_numbers, args.max_digits)
+        while True:
+            example, num_count, _ = generate_example(args.max_numbers, args.max_digits)
+            tokens = tokenizer.encode(example)
+            if len(tokens) <= max_tokens:
+                break
+        length = len(tokenizer.decode(tokenizer.encode(example.split('?')[0] + '?')))
         is_train = i < num_train
         
         prefix = "train" if is_train else "val"

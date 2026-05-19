@@ -31,6 +31,8 @@ class DataLoaderLite:
     def __init__(self, B, T, input_path, tokenizer=None):
         self.B = B
         self.T = T
+        self.input_path = input_path
+
         if tokenizer is None:
             base_dir = os.path.dirname(os.path.abspath(__file__))
             self.tokenizer = RPNTokenizer(os.path.join(base_dir, "rpn-tokenizer.json"))
@@ -63,6 +65,31 @@ class DataLoaderLite:
         print(f"Loaded {self.num_tokens} tokens from binary cache")
         print("1 epoch = ", self.num_tokens // (self.B * self.T), "micro-batches")
         self.current_pos = 0
+
+    def __getstate__(self):
+        state = self.__dict__.copy()
+        if 'tokens_mmap' in state:
+            del state['tokens_mmap']
+        if 'mask_mmap' in state:
+            del state['mask_mmap']
+        return state
+
+    def __setstate__(self, state):
+        self.__dict__.update(state)
+        if not hasattr(self, 'input_path'):
+            self.tokens_mmap = None
+            self.mask_mmap = None
+            return
+        bin_path = self.input_path + ".cnt.bin"
+        mask_path = self.input_path + ".mask.bin"
+        if os.path.exists(bin_path) and os.path.exists(mask_path):
+            self.tokens_mmap = np.memmap(bin_path, dtype=np.uint16, mode='r')
+            self.mask_mmap = np.memmap(mask_path, dtype=np.uint8, mode='r')
+        else:
+            self.tokens_mmap = None
+            self.mask_mmap = None
+
+
 
     def _create_binary_cache(self, input_path, bin_path, mask_path):
         import random

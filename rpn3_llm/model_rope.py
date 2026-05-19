@@ -24,6 +24,7 @@ class GPTConfig:
     phase_token_ids: list = None
     tau: float = 1.0 # sharpness of attention
     use_rezero: bool = False # if True, use learned scalar for residuals
+    freeze_embeddings: bool = False # if True, freeze the embedding layer
 
 # --- RoPE Implementation ---
 def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0):
@@ -387,6 +388,10 @@ class GPT(nn.Module):
             self.register_buffer("freqs_cis", freqs_cis, persistent=False)
 
         self.apply(self._init_weights)
+
+        if getattr(config, 'freeze_embeddings', False):
+            self.transformer.wte.weight.requires_grad = False
+            self.lm_head.weight.requires_grad = False
         
     def _init_weights(self, module: nn.Module):
         if isinstance(module, nn.Linear):

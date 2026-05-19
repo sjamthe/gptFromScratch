@@ -1,9 +1,12 @@
+import sys
 import os
-import re
 from collections import Counter
 
-failures_file = "/Users/sjamthe/Documents/GithubRepos/gptFromScratch/rpn3_llm/results/ut1.5M_2l_8h_384e_mlp3_phaseMask_True_rpn3_240000_failures.txt"
-
+if len(sys.argv) > 1:
+    failures_file = sys.argv[1]
+else:
+    # Default to the most recent run for convenience
+    failures_file = "/Users/sjamthe/Documents/GithubRepos/gptFromScratch/rpn3_llm/results/ut1.5M_2l_8h_384e_mlp3_phaseMask_True_sft_1-14_7num_BOS_560000_failures.txt"
 
 if not os.path.exists(failures_file):
     print(f"File not found: {failures_file}")
@@ -40,90 +43,87 @@ with open(failures_file, "r", encoding="utf-8") as f:
                 pred_ans = p[len("Pred Ans:"):]
                 
         # 1. Check 1st REV
-        if exp_rev != pred_rev:
+        if exp_rev.strip() != pred_rev.strip():
             phase_failures["1st REV"] += 1
         else:
-            # 2. Check 1st MATH
             exp_m_parts = exp_math.split("[MATH]")
             pred_m_parts = pred_math.split("[MATH]")
             
-            exp_m1 = exp_m_parts[0] if len(exp_m_parts) >= 1 else ""
-            pred_m1 = pred_m_parts[0] if len(pred_m_parts) >= 1 else ""
+            math_fail_step = -1
+            rev_fail_step = -1
+            failed_idx = -1
             
-            exp_steps1 = exp_m1.split("[REV]")[0]
-            pred_steps1 = pred_m1.split("[REV]")[0]
-            
-            if exp_steps1 != pred_steps1:
-                phase_failures["1st MATH"] += 1
-            else:
-                # 3. Check 2nd REV
-                exp_rev2 = exp_m1.split("[REV]")[1] if "[REV]" in exp_m1 else ""
-                pred_rev2 = pred_m1.split("[REV]")[1] if "[REV]" in pred_m1 else ""
+            for i in range(max(len(exp_m_parts), len(pred_m_parts))):
+                e = exp_m_parts[i].strip() if i < len(exp_m_parts) else None
+                p = pred_m_parts[i].strip() if i < len(pred_m_parts) else None
+                if e != p:
+                    failed_idx = i
+                    break
+                    
+            if failed_idx != -1:
+                e = exp_m_parts[failed_idx].strip() if failed_idx < len(exp_m_parts) else ""
+                p = pred_m_parts[failed_idx].strip() if failed_idx < len(pred_m_parts) else ""
                 
-                if exp_rev2 != pred_rev2:
-                    phase_failures["2nd REV"] += 1
-                    # separate ex_rev2, pred_rev2 into 2 numbers and rest and compare each
-                    # print which one fails
-                    ex_parts = exp_rev2.split("[SEP]")
-                    pred_parts = pred_rev2.split("[SEP]")
-                    
-                    ex1 = ex_parts[0]
-                    ex2 = ex_parts[1] if len(ex_parts) >= 2 else ""
-                    # ex2 contains operator just get the number part without operator
-                    # operator is always the last 2 chars for e.g. += or -= 
-                    if len(ex2) >= 2 and ex2[-1] in ['+', '-', '=']:
-                        ex2 = ex2.rstrip("+-=")
-                    
-                    pred1 = pred_parts[0]
-                    pred2 = pred_parts[1] if len(pred_parts) >= 2 else ""
-                    if len(pred2) >= 2 and pred2[-1] in ['+', '-', '=']:
-                        pred2 = pred2.rstrip("+-=")
-                    
-                    if ex1 != pred1:
-                        print(f"EXP N1: {ex1}")
-                        print(f"PRD N1: {pred1}")
-                    elif ex2 != pred2:
-                        # sort ex2 and pred2 and thenn compare both.
-                        ex2_sorted = "".join(sorted(ex2))
-                        pred2_sorted = "".join(sorted(pred2))
-                        if ex2_sorted != pred2_sorted:
-                            print(f"EXP N2: {ex2}")
-                            print(f"PRD N2: {pred2}")
-                        else:
-                            print("REV2 matches after sorting ")
+                e_sub = e.split("[REV]")
+                p_sub = p.split("[REV]") if p else []
+                
+                e_m = e_sub[0].strip()
+                p_m = p_sub[0].strip() if len(p_sub) > 0 else ""
+                
+                if e_m != p_m:
+                    math_fail_step = failed_idx + 1
+                    phase_failures[f"{math_fail_step}th MATH"] += 1
                 else:
-                    # 4. Check 2nd MATH
-                    exp_m2 = exp_m_parts[1] if len(exp_m_parts) >= 2 else ""
-                    pred_m2 = pred_m_parts[1] if len(pred_m_parts) >= 2 else ""
+                    rev_fail_step = failed_idx + 2
+                    phase_failures[f"{rev_fail_step}th REV"] += 1
                     
-                    exp_steps2 = exp_m2.split("[REV]")[0]
-                    pred_steps2 = pred_m2.split("[REV]")[0]
+                    # Sort comparison for REV failures
+                    e_rev = e_sub[1].strip() if len(e_sub) > 1 else ""
+                    p_rev = p_sub[1].strip() if len(p_sub) > 1 else ""
                     
-                    if exp_steps2 != pred_steps2:
-                        print(f"{total_lines}: EXP MATH2: {exp_steps2}")
-                        print(f"{total_lines}: PRD MATH2: {pred_steps2}")
-                        phase_failures["2nd MATH"] += 1
-                    else:
-                        # 5. Check ANS
-                        if exp_ans != pred_ans:
-                            phase_failures["ANS"] += 1
-                            ex_sorted = "".join(sorted(exp_ans))
-                            pred_sorted = "".join(sorted(pred_ans))
-                            if ex_sorted != pred_sorted:
-                                print(f"EXP ANS: {exp_ans.strip()}")
-                                print(f"PRD ANS: {pred_ans.strip()}")
-                            else:
-                                print("ANS matches after sorting ")
-                        else:
-                            # It might be a line that is NOT a failure (ie header line) but was in the file?
-                            phase_failures["UNKNOWN"] += 1
+                    ex_parts = e_rev.split("[SEP]")
+                    pred_parts = p_rev.split("[SEP]")
+                    
+                    # Strip '=' from tails for fair comparison
+                    ex_parts = [part.rstrip('=') for part in ex_parts]
+                    pred_parts = [part.rstrip('=') for part in pred_parts]
+                    
+                    sorted_ex = sorted(ex_parts)
+                    sorted_pred = sorted(pred_parts)
+                    
+                    if sorted_ex == sorted_pred:
+                        print(f"REV{rev_fail_step} matches after sorting (permutation error)!")
+            else:
+                # 3. Check ANS
+                if exp_ans.strip() != pred_ans.strip():
+                    phase_failures["ANS"] += 1
+                    ex_sorted = "".join(sorted(exp_ans))
+                    pred_sorted = "".join(sorted(pred_ans))
+                    if ex_sorted == pred_sorted:
+                        print("ANS matches after sorting ")
+                else:
+                    phase_failures["UNKNOWN"] += 1
 
 print(f"Total lines in failure file: {total_lines}")
 print("\n--- Failures by Phase (First Point of Failure) ---")
-print(f"{'Phase':<10} | {'Count':<6} | {'%':<6}")
-print("-" * 30)
+print(f"{'Phase':<12} | {'Count':<6} | {'%':<6}")
+print("-" * 32)
 total_classified = sum(phase_failures.values()) - phase_failures["UNKNOWN"]
-for phase in ["1st REV", "1st MATH", "2nd REV", "2nd MATH", "ANS"]:
+
+# Custom sort keys to order mathematically
+def phase_sort_key(phase):
+    if phase == "1st REV": return 0
+    if phase == "ANS": return 999
+    if phase == "UNKNOWN": return 1000
+    digits = ''.join(filter(str.isdigit, phase))
+    if not digits: return 1000
+    num = int(digits)
+    if "MATH" in phase: return num * 2 - 1
+    if "REV" in phase: return num * 2
+    return 1000
+
+for phase in sorted(phase_failures.keys(), key=phase_sort_key):
+    if phase == "UNKNOWN": continue
     count = phase_failures[phase]
     pct = (count / total_classified) * 100 if total_classified > 0 else 0
-    print(f"{phase:<10} | {count:<6} | {pct:>5.1f}%")
+    print(f"{phase:<12} | {count:<6} | {pct:>5.1f}%")

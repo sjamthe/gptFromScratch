@@ -6,7 +6,7 @@ import time
 from collections import defaultdict
 from utils import RPNTokenizer, DataLoaderLite
 
-VALIDATION_SET_RATIO = 0.2
+VALIDATION_SET_RATIO = 0.03
 
 def calculate_carries(a_str, b_str, op):
     a, b = int(a_str), int(b_str)
@@ -156,11 +156,8 @@ def validate_model(checkpoint_path, test_file_path, output_fail_path, arch=None,
         'only_final_ans_failed': 0
     }
     
-    # Stats by problem type (2-num vs 3-num)
-    type_stats = {
-        '2-num': {'total': 0, 'correct': 0, 'reversal_failed': 0, 'math_failed': 0, 'only_final_ans_failed': 0},
-        '3-num': {'total': 0, 'correct': 0, 'reversal_failed': 0, 'math_failed': 0, 'only_final_ans_failed': 0, 'math1_failed': 0, 'math2_failed': 0, 'rev2_failed': 0}
-    }
+    # Stats by problem type (N-num)
+    type_stats = defaultdict(lambda: defaultdict(int))
     reversal_fail_by_spaces = defaultdict(int) # Key: (s1_len, s2_len)
     reversal_pos_failures = defaultdict(int) # Dynamically tracks num1, num2, etc.
     reversal_digit_failures = defaultdict(int) # Key: num_digits
@@ -293,12 +290,13 @@ def validate_model(checkpoint_path, test_file_path, output_fail_path, arch=None,
                 prompt_str = prompt_strs[b]
                 total_length = len(prompt_str) + len(expected_str)
                 
-                # New regex to handle [BOS] and ? (handles 2 and 3 numbers)
-                # Added \s* before the 3rd number group to handle optional space!
-                m = re.search(r"(\d+)\s+(\d+)([+\-])\s*(?:(\d+)([+\-]))?\?", prompt_str)
+                clean_prompt = prompt_str.replace("[BOS]", "").replace("?", "").strip()
+                prompt_tokens = clean_prompt.split()
+                num_operands = len(prompt_tokens)
+                p_type = f"{num_operands}-num"
                 
-                # Identify if it's a 3-number problem
-                is_3_num = m.group(4) is not None if m else False
+                if p_type not in type_stats:
+                    type_stats[p_type] = defaultdict(int)
                 
                 expected_ans_str = expected_str.split("[ANS]")[-1].split("[UNK]")[0].split("[EOS]")[0].strip() if "[ANS]" in expected_str else ""
                 predicted_ans_str = predicted_str.split("[ANS]")[-1].split("[UNK]")[0].split("[EOS]")[0].strip() if "[ANS]" in predicted_str else ""
@@ -325,8 +323,11 @@ def validate_model(checkpoint_path, test_file_path, output_fail_path, arch=None,
 
                 carries = 0
                 is_zero = False
-                if m:
-                    n1_str, n2_str, op = m.groups()[:3]
+                if len(prompt_tokens) >= 2:
+                    n1_str = prompt_tokens[0]
+                    n2_op = prompt_tokens[1]
+                    n2_str = n2_op[:-1]
+                    op = n2_op[-1]
                     try:
                         p0_val = int(n1_str); p1_val = int(n2_str)
                         is_zero = (p0_val == 0 or p1_val == 0)
@@ -429,51 +430,47 @@ def validate_model(checkpoint_path, test_file_path, output_fail_path, arch=None,
                         failure_categories['math_failed'] += 1
                         matched = True
                         
-                        if is_3_num:
-                            exp_m_parts = exp_math.split("[MATH]")
-                            pred_m_parts = pred_math.split("[MATH]")
+                        exp_m_parts = exp_math.split("[MATH]")
+                        pred_m_parts = pred_math.split("[MATH]")
+                        
+                        fail_idx = -1
+                        for i in range(max(len(exp_m_parts), len(pred_m_parts))):
+                            e = exp_m_parts[i].strip() if i < len(exp_m_parts) else None
+                            p = pred_m_parts[i].strip() if i < len(pred_m_parts) else None
+                            if e != p:
+                                fail_idx = i
+                                break
+                                
+                        math_fail_step = -1
+                        rev_fail_step = -1
+
+                        if fail_idx != -1:
+                            e = exp_m_parts[fail_idx].strip() if fail_idx < len(exp_m_parts) else ""
+                            p = pred_m_parts[fail_idx].strip() if fail_idx < len(pred_m_parts) else ""
                             
-                            fail_idx = -1
-                            for i in range(len(exp_m_parts)):
-                                e = exp_m_parts[i].strip()
-                                p = pred_m_parts[i].strip() if i < len(pred_m_parts) else ""
-                                if e != p:
-                                    fail_idx = i
-                                    break
-                            
-                            if fail_idx == 0:
-                                # Differentiate between MATH1 and REV2 inside the first block if there is a [REV]
-                                if "[REV]" in exp_m_parts[0]:
-                                    e_sub = exp_m_parts[0].split("[REV]")
-                                    p_sub = pred_m_parts[0].split("[REV]") if len(pred_m_parts) > 0 else []
-                                    
-                                    e_m1 = e_sub[0].strip()
-                                    p_m1 = p_sub[0].strip() if len(p_sub) > 0 else ""
-                                    
-                                    if e_m1 != p_m1:
-                                        type_stats['3-num']['math1_failed'] += 1
-                                        math1_fail = True
-                                    else:
-                                        type_stats['3-num']['rev2_failed'] += 1
-                                        rev2_fail = True
+                            if "[REV]" in e:
+                                e_sub = e.split("[REV]")
+                                p_sub = p.split("[REV]") if p else []
+                                
+                                e_m = e_sub[0].strip()
+                                p_m = p_sub[0].strip() if len(p_sub) > 0 else ""
+                                
+                                if e_m != p_m:
+                                    math_fail_step = fail_idx + 1
                                 else:
-                                    type_stats['3-num']['math1_failed'] += 1
-                                    math1_fail = True
-                            elif fail_idx == 1:
-                                type_stats['3-num']['math2_failed'] += 1
-                                math2_fail = True
-                            elif fail_idx > 1:
-                                type_stats['3-num']['math2_failed'] += 1 # We'll just lump it here for now
-                                math2_fail = True
-                            elif len(pred_m_parts) < len(exp_m_parts):
-                                type_stats['3-num']['math2_failed'] += 1
-                                math2_fail = True
+                                    rev_fail_step = fail_idx + 2
+                            else:
+                                math_fail_step = fail_idx + 1
+                                
+                        if math_fail_step != -1:
+                            type_stats[p_type][f'math{math_fail_step}_failed'] += 1
+                        elif rev_fail_step != -1:
+                            type_stats[p_type][f'rev{rev_fail_step}_failed'] += 1
                     
                     elif not matched:
                         failure_categories['only_final_ans_failed'] += 1
 
                     # Update type stats
-                    p_type = '3-num' if is_3_num else '2-num'
                     type_stats[p_type]['total'] += 1
                     if is_reversal_skip or is_reversal_fail:
                         type_stats[p_type]['reversal_failed'] += 1
@@ -483,7 +480,7 @@ def validate_model(checkpoint_path, test_file_path, output_fail_path, arch=None,
                         type_stats[p_type]['only_final_ans_failed'] += 1
 
                     # Document failure
-                    reason = "REV_SKIP" if is_reversal_skip else f"REV_FAIL_{fail_str}" if is_reversal_fail else "MATH1_FAIL" if (is_math_fail and math1_fail) else "MATH2_FAIL" if (is_math_fail and math2_fail) else "MATH_FAIL" if is_math_fail else "ANS_FAIL"
+                    reason = "REV_SKIP" if is_reversal_skip else f"REV_FAIL_{fail_str}" if is_reversal_fail else f"MATH{math_fail_step}_FAIL" if (is_math_fail and math_fail_step != -1) else f"REV{rev_fail_step}_FAIL" if (is_math_fail and rev_fail_step != -1) else "MATH_FAIL" if is_math_fail else "ANS_FAIL"
                     fail_str = f"Q_Len:{total_length} | [{reason}]:{prompt_str} | Exp Rev:{exp_pre} | Pred Rev:{pred_pre} | Exp Math:{exp_math} | Pred Math:{pred_math} | Exp Ans:{exp_ans_final} | Pred Ans:{pred_ans_final}"
                     failures.append(fail_str)
                     # Stream directly to disk live!
@@ -499,7 +496,6 @@ def validate_model(checkpoint_path, test_file_path, output_fail_path, arch=None,
                     if is_normal: edge_stats['normal']['correct'] += 1
 
                     # Update type stats
-                    p_type = '3-num' if is_3_num else '2-num'
                     type_stats[p_type]['total'] += 1
                     type_stats[p_type]['correct'] += 1
 
@@ -593,19 +589,18 @@ def validate_model(checkpoint_path, test_file_path, output_fail_path, arch=None,
             pct = (count / total_digit_fails * 100) if total_digit_fails > 0 else 0
             print(f"{length:2d} digits: {count} failures ({pct:.1f}%)")
 
-    print("\n--- Problem Type Breakdown (2-num vs 3-num) ---")
+    print("\n--- Problem Type Breakdown ---")
     for p_type, stats in type_stats.items():
         tot = stats['total']
         cor = stats['correct']
         acc = (cor / tot) * 100 if tot > 0 else 0
         print(f"{p_type}: Total: {tot} | Correct: {cor} | Accuracy: {acc:.2f}%")
-        if p_type == '3-num':
-            m1 = stats.get('math1_failed', 0)
-            m2 = stats.get('math2_failed', 0)
-            r2 = stats.get('rev2_failed', 0)
-            print(f"  Failures -> Rev: {stats['reversal_failed']}, Math: {stats['math_failed']} (Math1: {m1}, Rev2: {r2}, Math2: {m2}), Ans: {stats['only_final_ans_failed']}")
-        else:
-            print(f"  Failures -> Rev: {stats['reversal_failed']}, Math: {stats['math_failed']}, Ans: {stats['only_final_ans_failed']}")
+        detail_items = []
+        for k, v in sorted(stats.items()):
+            if k not in ['total', 'correct', 'reversal_failed', 'math_failed', 'only_final_ans_failed']:
+                detail_items.append(f"{k.replace('_failed', '')}: {v}")
+        detail_str = f" ({', '.join(detail_items)})" if detail_items else ""
+        print(f"  Failures -> Rev: {stats.get('reversal_failed', 0)}, Math: {stats.get('math_failed', 0)}{detail_str}, Ans: {stats.get('only_final_ans_failed', 0)}")
 
     with open(summary_path, "a", encoding="utf-8") as f:
         f.write("\n--- Failure Category Breakdown ---\n")
@@ -613,19 +608,18 @@ def validate_model(checkpoint_path, test_file_path, output_fail_path, arch=None,
             pct = (count / total_processed * 100) if total_processed > 0 else 0
             f.write(f"{cat:<20}: {count} ({pct:.1f}%)\n")
         
-        f.write("\n--- Problem Type Breakdown (2-num vs 3-num) ---\n")
+        f.write("\n--- Problem Type Breakdown ---\n")
         for p_type, stats in type_stats.items():
             tot = stats['total']
             cor = stats['correct']
             acc = (cor / tot) * 100 if tot > 0 else 0
             f.write(f"{p_type}: Total: {tot} | Correct: {cor} | Accuracy: {acc:.2f}%\n")
-            if p_type == '3-num':
-                m1 = stats.get('math1_failed', 0)
-                m2 = stats.get('math2_failed', 0)
-                r2 = stats.get('rev2_failed', 0)
-                f.write(f"  Failures -> Rev: {stats['reversal_failed']}, Math: {stats['math_failed']} (Math1: {m1}, Rev2: {r2}, Math2: {m2}), Ans: {stats['only_final_ans_failed']}\n")
-            else:
-                f.write(f"  Failures -> Rev: {stats['reversal_failed']}, Math: {stats['math_failed']}, Ans: {stats['only_final_ans_failed']}\n")
+            detail_items = []
+            for k, v in sorted(stats.items()):
+                if k not in ['total', 'correct', 'reversal_failed', 'math_failed', 'only_final_ans_failed']:
+                    detail_items.append(f"{k.replace('_failed', '')}: {v}")
+            detail_str = f" ({', '.join(detail_items)})" if detail_items else ""
+            f.write(f"  Failures -> Rev: {stats.get('reversal_failed', 0)}, Math: {stats.get('math_failed', 0)}{detail_str}, Ans: {stats.get('only_final_ans_failed', 0)}\n")
 
         f.write("\n--- Reversal Failure Analysis (Position & Length) ---\n")
         total_pos_fails = sum(reversal_pos_failures.values())
