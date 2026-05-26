@@ -25,6 +25,8 @@ class GPTConfig:
     tau: float = 1.0 # sharpness of attention
     use_rezero: bool = False # if True, use learned scalar for residuals
     freeze_embeddings: bool = False # if True, freeze the embedding layer
+    use_focal_loss: bool = False # if True, use focal loss to focus on hard tokens
+    focal_loss_gamma: float = 2.0 # gamma parameter for focal loss
 
 # --- RoPE Implementation ---
 def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0):
@@ -126,6 +128,10 @@ class CausalSelfAttention(nn.Module):
             q_s = q_s.transpose(1, 2)
             k_s = k_s.transpose(1, 2)
             v_s = v_s.transpose(1, 2)
+            
+            if self.tau < 1.0 and self.tau > 0.0:
+                q_l = q_l / self.tau
+                q_s = q_s / self.tau
             
             if use_cache:
                 if cache_state is not None:
@@ -411,7 +417,7 @@ class GPT(nn.Module):
         attn_mask = None
         if T > 1: 
             # Training / First step of generation
-            is_bos = (idx == self.config.bos_token_id)
+            is_bos = (idx == self.config.bos_token_id)  
             seq_ids = is_bos.cumsum(dim=-1)
             doc_mask = (seq_ids.unsqueeze(1) == seq_ids.unsqueeze(2))
             causal_mask = torch.tril(torch.ones(T, T, device=idx.device, dtype=torch.bool))
@@ -534,7 +540,30 @@ class GPT(nn.Module):
         loss = None
         if targets is not None:
             logits = self.lm_head(x)
-            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1))
+            use_focal = getattr(self.config, 'use_focal_loss', False)
+            if use_focal:
+                gamma = getattr(self.config, 'focal_loss_gamma', 2.0)
+                flat_logits = logits.view(-1, logits.size(-1))
+                flat_targets = targets.view(-1)
+                
+                # Clone targets and replace ignore_index (-100) with a safe index (0) for gather
+                targets_safe = flat_targets.clone()
+                mask = (targets_safe == -100)
+                targets_safe[mask] = 0
+                
+                probs = F.softmax(flat_logits, dim=-1)
+                pt = probs.gather(-1, targets_safe.unsqueeze(-1)).squeeze(-1)
+                
+                ce = F.cross_entropy(flat_logits, flat_targets, ignore_index=-100, reduction='none')
+                
+                focal_weight = (1.0 - pt) ** gamma
+                focal_weight[mask] = 0.0  # Zero out ignored tokens
+                
+                # Mean over only active tokens
+                num_active = (~mask).sum()
+                loss = (focal_weight * ce).sum() / (num_active + 1e-8)
+            else:
+                loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1))
         else:
             logits = self.lm_head(x[:, [-1], :])
             

@@ -1,129 +1,218 @@
-import sys
+import re
 import os
-from collections import Counter
 
-if len(sys.argv) > 1:
-    failures_file = sys.argv[1]
-else:
-    # Default to the most recent run for convenience
-    failures_file = "/Users/sjamthe/Documents/GithubRepos/gptFromScratch/rpn3_llm/results/ut1.5M_2l_8h_384e_mlp3_phaseMask_True_sft_1-14_7num_BOS_560000_failures.txt"
+def analyze_failures():
+    failures_file = "/Users/sjamthe/Documents/GithubRepos/gptFromScratch/rpn3_llm/results/ut1.8M_2l_8h_384e_mlp4_phaseMask_True_theta_tau0.7_sft_1-14_7num_BOS_500000_7num_ratio_1.0_failures.txt"
+    if not os.path.exists(failures_file):
+        print(f"Error: {failures_file} does not exist.")
+        return
 
-if not os.path.exists(failures_file):
-    print(f"File not found: {failures_file}")
-    exit()
+    with open(failures_file, "r", encoding="utf-8") as f:
+        lines = f.readlines()
 
-total_lines = 0
-phase_failures = Counter()
+    # Phase name mapping
+    phase_names = {
+        2: "MATH1",
+        3: "REV2",
+        4: "MATH2",
+        5: "REV3",
+        6: "MATH3",
+        7: "REV4",
+        8: "MATH4",
+        9: "REV5",
+        10: "MATH5",
+        11: "REV6",
+        12: "MATH6",
+        13: "REV7",
+        14: "ANS"
+    }
 
-with open(failures_file, "r", encoding="utf-8") as f:
-    for line in f:
-        total_lines += 1
+    results = []
+    
+    # Summary counters
+    total_failures = 0
+    phase_counts = {}
+    type_counts = {}
+    copy_source_counts = {}
+    char_mismatch_counts = {}
+
+    for line_idx, line in enumerate(lines):
+        if not line.startswith("Q_Len:"):
+            continue
+        total_failures += 1
         
-        # Extract parts
         parts = line.split(" | ")
-        exp_rev = ""
-        pred_rev = ""
-        exp_math = ""
-        pred_math = ""
-        exp_ans = ""
-        pred_ans = ""
+        if len(parts) < 6:
+            continue
+            
+        metadata = parts[0]
+        prompt_str = parts[1]
+        exp_rev_part = parts[2]
+        pred_rev_part = parts[3]
+        exp_math_part = parts[4]
+        pred_math_part = parts[5]
         
-        for p in parts:
-            if p.startswith("Exp Rev:"):
-                exp_rev = p[len("Exp Rev:"):]
-            elif p.startswith("Pred Rev:"):
-                pred_rev = p[len("Pred Rev:"):]
-            elif p.startswith("Exp Math:"):
-                exp_math = p[len("Exp Math:"):]
-            elif p.startswith("Pred Math:"):
-                pred_math = p[len("Pred Math:"):]
-            elif p.startswith("Exp Ans:"):
-                exp_ans = p[len("Exp Ans:"):]
-            elif p.startswith("Pred Ans:"):
-                pred_ans = p[len("Pred Ans:"):]
-                
-        # 1. Check 1st REV
-        if exp_rev.strip() != pred_rev.strip():
-            phase_failures["1st REV"] += 1
-        else:
-            exp_m_parts = exp_math.split("[MATH]")
-            pred_m_parts = pred_math.split("[MATH]")
-            
-            math_fail_step = -1
-            rev_fail_step = -1
-            failed_idx = -1
-            
-            for i in range(max(len(exp_m_parts), len(pred_m_parts))):
-                e = exp_m_parts[i].strip() if i < len(exp_m_parts) else None
-                p = pred_m_parts[i].strip() if i < len(pred_m_parts) else None
-                if e != p:
-                    failed_idx = i
+        prompt = prompt_str.split(":", 1)[1].strip()
+        exp_rev = exp_rev_part.split(":", 1)[1].strip()
+        pred_rev = pred_rev_part.split(":", 1)[1].strip()
+        exp_math = exp_math_part.split(":", 1)[1].strip()
+        pred_math = pred_math_part.split(":", 1)[1].strip()
+        
+        # Check if the failure is in the initial REV1 phase
+        if exp_rev != pred_rev:
+            # Reversal 1 failure
+            phase = "REV1"
+            fail_type = "initial_reversal"
+            copy_source = "PROMPT"
+            # Find mismatch in REV1
+            min_len = min(len(exp_rev), len(pred_rev))
+            diff_idx = -1
+            for idx in range(min_len):
+                if exp_rev[idx] != pred_rev[idx]:
+                    diff_idx = idx
                     break
-                    
-            if failed_idx != -1:
-                e = exp_m_parts[failed_idx].strip() if failed_idx < len(exp_m_parts) else ""
-                p = pred_m_parts[failed_idx].strip() if failed_idx < len(pred_m_parts) else ""
-                
-                e_sub = e.split("[REV]")
-                p_sub = p.split("[REV]") if p else []
-                
-                e_m = e_sub[0].strip()
-                p_m = p_sub[0].strip() if len(p_sub) > 0 else ""
-                
-                if e_m != p_m:
-                    math_fail_step = failed_idx + 1
-                    phase_failures[f"{math_fail_step}th MATH"] += 1
+            if diff_idx == -1:
+                diff_idx = min_len
+            exp_char = exp_rev[diff_idx] if diff_idx < len(exp_rev) else "<EOF>"
+            pred_char = pred_rev[diff_idx] if diff_idx < len(pred_rev) else "<EOF>"
+        else:
+            # Failure is in MATH or subsequent REV phases
+            min_len = min(len(exp_math), len(pred_math))
+            diff_idx = -1
+            for idx in range(min_len):
+                if exp_math[idx] != pred_math[idx]:
+                    diff_idx = idx
+                    break
+            #if diff_idx == -1:
+            #    diff_idx = min_len #Why are we doing this? this should not happen so assert.
+            assert diff_idx != -1
+            exp_char = exp_math[diff_idx] if diff_idx < len(exp_math) else "<EOF>"
+            pred_char = pred_math[diff_idx] if diff_idx < len(pred_math) else "<EOF>"
+            
+            # Determine Phase
+            sub_str = exp_math[:diff_idx]
+            current_phase_num = 2  # Starts at phase 2 (MATH1)
+            pos = 0
+            while pos < len(sub_str):
+                if sub_str[pos:].startswith("[REV]"):
+                    current_phase_num += 1
+                    pos += len("[REV]")
+                elif sub_str[pos:].startswith("[MATH]"):
+                    current_phase_num += 1
+                    pos += len("[MATH]")
+                elif sub_str[pos:].startswith("[ANS]"):
+                    current_phase_num += 1
+                    pos += len("[ANS]")
                 else:
-                    rev_fail_step = failed_idx + 2
-                    phase_failures[f"{rev_fail_step}th REV"] += 1
-                    
-                    # Sort comparison for REV failures
-                    e_rev = e_sub[1].strip() if len(e_sub) > 1 else ""
-                    p_rev = p_sub[1].strip() if len(p_sub) > 1 else ""
-                    
-                    ex_parts = e_rev.split("[SEP]")
-                    pred_parts = p_rev.split("[SEP]")
-                    
-                    # Strip '=' from tails for fair comparison
-                    ex_parts = [part.rstrip('=') for part in ex_parts]
-                    pred_parts = [part.rstrip('=') for part in pred_parts]
-                    
-                    sorted_ex = sorted(ex_parts)
-                    sorted_pred = sorted(pred_parts)
-                    
-                    if sorted_ex == sorted_pred:
-                        print(f"REV{rev_fail_step} matches after sorting (permutation error)!")
+                    pos += 1
+            
+            phase = phase_names.get(current_phase_num, f"PHASE_{current_phase_num}")
+            
+            # Find the substring for this phase
+            last_token_idx = 0
+            for token in ["[REV]", "[MATH]", "[ANS]"]:
+                idx_find = sub_str.rfind(token)
+                if idx_find > last_token_idx:
+                    last_token_idx = idx_find
+            
+            # Find which token it was
+            for token in ["[REV]", "[MATH]", "[ANS]"]:
+                if sub_str[last_token_idx:].startswith(token):
+                    start_idx = last_token_idx + len(token)
+                    break
             else:
-                # 3. Check ANS
-                if exp_ans.strip() != pred_ans.strip():
-                    phase_failures["ANS"] += 1
-                    ex_sorted = "".join(sorted(exp_ans))
-                    pred_sorted = "".join(sorted(pred_ans))
-                    if ex_sorted == pred_sorted:
-                        print("ANS matches after sorting ")
+                start_idx = 0
+                
+            end_idx = len(exp_math)
+            for token in ["[REV]", "[MATH]", "[ANS]"]:
+                idx_find = exp_math.find(token, start_idx)
+                if idx_find != -1 and idx_find < end_idx:
+                    end_idx = idx_find
+                    
+            phase_text = exp_math[start_idx:end_idx]
+            rel_diff_idx = diff_idx - start_idx
+            
+            if "REV" in phase:
+                # Inside a reversal phase (REV2, REV3, etc.)
+                # Split by [SEP] to find which sub-block failed
+                sep_positions = [0]
+                for m in re.finditer(r"\[SEP\]", phase_text):
+                    sep_positions.append(m.start())
+                    sep_positions.append(m.end())
+                sep_positions.append(len(phase_text))
+                
+                sub_block_idx = -1
+                is_separator = False
+                for i in range(0, len(sep_positions) - 1, 2):
+                    start_b = sep_positions[i]
+                    end_b = sep_positions[i+1]
+                    if start_b <= rel_diff_idx < end_b:
+                        sub_block_idx = i // 2
+                        break
+                    if i + 2 < len(sep_positions):
+                        start_s = sep_positions[i+1]
+                        end_s = sep_positions[i+2]
+                        if start_s <= rel_diff_idx < end_s:
+                            is_separator = True
+                            break
+                            
+                if is_separator:
+                    fail_type = "separator_[SEP]"
+                    copy_source = "CONSTANT"
+                elif sub_block_idx == 0:
+                    fail_type = "intermediate_math_result"
+                    copy_source = "MATH"
+                elif sub_block_idx > 0:
+                    fail_type = f"after_sep{sub_block_idx}_failed"
+                    copy_source = "REV"
                 else:
-                    phase_failures["UNKNOWN"] += 1
+                    fail_type = "unknown_reversal_block"
+                    copy_source = "UNKNOWN"
+            elif "MATH" in phase:
+                fail_type = "math_computation"
+                copy_source = "REV_AND_MATH"
+            else:
+                fail_type = "final_answer_generation"
+                copy_source = "MATH"
+                
+        # Record results
+        phase_counts[phase] = phase_counts.get(phase, 0) + 1
+        type_counts[fail_type] = type_counts.get(fail_type, 0) + 1
+        copy_source_counts[copy_source] = copy_source_counts.get(copy_source, 0) + 1
+        
+        mismatch_pair = f"'{exp_char}' -> '{pred_char}'"
+        char_mismatch_counts[mismatch_pair] = char_mismatch_counts.get(mismatch_pair, 0) + 1
+        
+        results.append({
+            "line": line_idx + 1,
+            "phase": phase,
+            "rel_diff_idx": rel_diff_idx,
+            "fail_type": fail_type,
+            "copy_source": copy_source,
+            "expected_char": exp_char,
+            "predicted_char": pred_char
+        })
+        
+    print(f"Total analyzed failures: {total_failures}")
+    print("\n--- Failure Count by Phase ---")
+    for phase, count in sorted(phase_counts.items(), key=lambda x: x[1], reverse=True):
+        print(f"  {phase:<10}: {count} ({count/total_failures*100:.1f}%)")
+        
+    print("\n--- Failure Count by Copy Source ---")
+    for src, count in sorted(copy_source_counts.items(), key=lambda x: x[1], reverse=True):
+        print(f"  {src:<15}: {count} ({count/total_failures*100:.1f}%)")
 
-print(f"Total lines in failure file: {total_lines}")
-print("\n--- Failures by Phase (First Point of Failure) ---")
-print(f"{'Phase':<12} | {'Count':<6} | {'%':<6}")
-print("-" * 32)
-total_classified = sum(phase_failures.values()) - phase_failures["UNKNOWN"]
+    print("\n--- Failure Count by Failure Type ---")
+    for t, count in sorted(type_counts.items(), key=lambda x: x[1], reverse=True):
+        print(f"  {t:<30}: {count} ({count/total_failures*100:.1f}%)")
 
-# Custom sort keys to order mathematically
-def phase_sort_key(phase):
-    if phase == "1st REV": return 0
-    if phase == "ANS": return 999
-    if phase == "UNKNOWN": return 1000
-    digits = ''.join(filter(str.isdigit, phase))
-    if not digits: return 1000
-    num = int(digits)
-    if "MATH" in phase: return num * 2 - 1
-    if "REV" in phase: return num * 2
-    return 1000
+    print("\n--- Top Character Mismatches (Expected -> Predicted) ---")
+    for pair, count in sorted(char_mismatch_counts.items(), key=lambda x: x[1], reverse=True)[:15]:
+        print(f"  {pair:<12}: {count} ({count/total_failures*100:.1f}%)")
+        
+    print("\n--- Detailed List of Failures ---")
+    for r in results:
+        print(f"Line {r['line']}: Phase {r['phase']} | idx: {r['rel_diff_idx']} | Type: {r['fail_type']} | Copied from: {r['copy_source']} | Mismatch: '{r['expected_char']}' -> '{r['predicted_char']}'")
 
-for phase in sorted(phase_failures.keys(), key=phase_sort_key):
-    if phase == "UNKNOWN": continue
-    count = phase_failures[phase]
-    pct = (count / total_classified) * 100 if total_classified > 0 else 0
-    print(f"{phase:<12} | {count:<6} | {pct:>5.1f}%")
+if __name__ == "__main__":
+    analyze_failures()

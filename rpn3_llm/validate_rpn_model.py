@@ -63,7 +63,7 @@ def get_prompt_for_phase(line, phase):
     parts = line.split("?")
     return parts[0] + "?" if len(parts) > 1 else line
 
-def validate_model(checkpoint_path, test_file_path, output_fail_path, arch=None, num_passes=None, early_stop=None, force_mask=None, test_phase="REV1"):
+def validate_model(checkpoint_path, test_file_path, output_fail_path, arch=None, num_passes=None, early_stop=None, force_mask=None, test_phase="REV1", filter_7num=False, ratio=0.03):
     device = 'cuda' if torch.cuda.is_available() else 'mps' if torch.backends.mps.is_available() else 'cpu'
     print(f"Using device: {device}")
 
@@ -119,6 +119,13 @@ def validate_model(checkpoint_path, test_file_path, output_fail_path, arch=None,
             continue
             
         line_clean = line.rstrip()
+        
+        if filter_7num:
+            # Count operands: prompt is before '?'
+            clean_prompt = line_clean.split("?", 1)[0].replace("[BOS]", "").strip()
+            prompt_words = clean_prompt.split()
+            if len(prompt_words) != 7:
+                continue
         prompt_str = get_prompt_for_phase(line_clean, test_phase)
         
         # We must group by the exact number of tokens in the prompt
@@ -189,7 +196,7 @@ def validate_model(checkpoint_path, test_file_path, output_fail_path, arch=None,
     with open(summary_path, "w", encoding="utf-8") as f:
         f.write(f"--- Validation Summary - Model: {checkpoint_path} ---\n\n")
 
-    max_rows = int(VALIDATION_SET_RATIO*total_items/len(length_groups))
+    max_rows = int(ratio*total_items/len(length_groups))
     print(f"Beginning batched evaluation on {max_rows} rows per group...")
     accuracy_by_length = {}
     processed_by_length = {}
@@ -645,6 +652,8 @@ if __name__ == "__main__":
     parser.add_argument("--early_stop", type=int, default=None, help="Stop if logit is stable for N passes")
     parser.add_argument("--force_mask", type=str, default=None, choices=["True", "False"], help="Force enable/disable phase mask")
     parser.add_argument("--test_phase", type=str, default="REV1", choices=["REV1", "MATH1", "REV2", "MATH2", "ANS"], help="Phase to begin generation from")
+    parser.add_argument("--filter_7num", action="store_true", help="Only validate 7-num equations")
+    parser.add_argument("--ratio", type=float, default=0.03, help="Validation set ratio to evaluate")
     
     args = parser.parse_args()
     
@@ -657,6 +666,8 @@ if __name__ == "__main__":
         model_name = model_basename.replace(".pt", "")
         fmask_str = f"_fmask_{fmask}" if fmask is not None else ""
         phase_str = f"_phase_{args.test_phase}" if args.test_phase != "REV1" else ""
-        args.output_file = f"rpn3_llm/results/{model_name}{fmask_str}{phase_str}_failures.txt"
+        filter_str = "_7num" if args.filter_7num else ""
+        ratio_str = f"_ratio_{args.ratio}" if args.ratio != 0.03 else ""
+        args.output_file = f"rpn3_llm/results/{model_name}{fmask_str}{phase_str}{filter_str}{ratio_str}_failures.txt"
 
-    validate_model(args.model, args.test_file, args.output_file, arch=args.arch, num_passes=args.num_passes, early_stop=args.early_stop, force_mask=fmask, test_phase=args.test_phase)
+    validate_model(args.model, args.test_file, args.output_file, arch=args.arch, num_passes=args.num_passes, early_stop=args.early_stop, force_mask=fmask, test_phase=args.test_phase, filter_7num=args.filter_7num, ratio=args.ratio)

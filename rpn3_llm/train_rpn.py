@@ -39,7 +39,7 @@ def run_teacher_forcing_validation(model, val_loader, device, step):
     val_math2_errors = 0
     val_ans_total = 0
     val_ans_errors = 0
-    debug_print_count = 0
+    debug_print_count = 10 # disable debug printing
 
     with torch.no_grad():
         for _ in range(val_loss_steps):
@@ -61,6 +61,9 @@ def run_teacher_forcing_validation(model, val_loader, device, step):
             y_cpu = y_val.cpu().numpy()
             x_cpu = x_val.cpu().numpy()
             
+            # Calculate softmax probabilities for prediction profiling
+            probs = logits.softmax(dim=-1)
+
             for b in range(y_cpu.shape[0]):
                 # Find the first [BOS] in the input sequence (since it's masked in y_val)
                 start_pos = None
@@ -131,12 +134,6 @@ def run_teacher_forcing_validation(model, val_loader, device, step):
                         equation_correct = False
                         if phase == 'rev1':
                             rev1_error = True
-                            if debug_print_count < 0: # disabled
-                                # (prompt_str is already calculated above)
-                                exp_str = tokenizer.decode([tok_y])
-                                pred_str = tokenizer.decode([tok_p])
-                                print(f"DEBUG [REV1 FAIL]: Prompt: {prompt_str} | Exp: '{exp_str}' | Pred: '{pred_str}'")
-                                debug_print_count += 1
                         elif phase == 'math1':
                             math1_error = True
                         elif phase == 'rev2':
@@ -145,6 +142,32 @@ def run_teacher_forcing_validation(model, val_loader, device, step):
                             math2_error = True
                         elif phase == 'ans':
                             ans_error = True
+                        
+                        if debug_print_count < 10:
+                            context_tokens = y_cpu[b, rev_start:t]
+                            context_str = tokenizer.decode(context_tokens)
+                            prob_expected = probs[b, t, int(tok_y)].item()
+                            prob_predicted = probs[b, t, int(tok_p)].item()
+                            
+                            val_probs, val_indices = torch.topk(probs[b, t], k=min(5, probs.shape[-1]))
+                            top_preds = []
+                            for rank, (p_val, idx_val) in enumerate(zip(val_probs.tolist(), val_indices.tolist())):
+                                tok_str = tokenizer.decode([idx_val])
+                                tok_str_escaped = tok_str.replace('\n', '\\n')
+                                top_preds.append(f"'{tok_str_escaped}' ({p_val:.2%})")
+                            top_preds_str = ", ".join(top_preds)
+                            
+                            expected_token_escaped = tokenizer.decode([tok_y]).replace('\n', '\\n')
+                            predicted_token_escaped = tokenizer.decode([tok_p]).replace('\n', '\\n')
+                            
+                            print(f"\n[VAL DEBUG ERROR] Phase: {phase.upper() if phase else 'NONE'} | Eq #{int(val_target_accum)+1}")
+                            print(f"  Prompt:         {prompt_str}")
+                            print(f"  Context so far: {context_str}")
+                            print(f"  Expected:       '{expected_token_escaped}' (prob: {prob_expected:.2%})")
+                            print(f"  Predicted:      '{predicted_token_escaped}' (prob: {prob_predicted:.2%})")
+                            print(f"  Top 5 candidates: {top_preds_str}")
+                            
+                            debug_print_count += 1
                         break
 
                     token_count += 1
@@ -274,7 +297,7 @@ def run_generation_validation(model, val_loader, device, step, num_batches=4):
     model.train()
     return gen_accuracy_pct
 
-def train_rpn_llm(start_step=0, checkpoint_path=None, model_type="rope", max_steps=80000, dataset_prefix="1-22_uniform_BOS", use_phase_mask=True, mlp_ratio=4, tau=1.0, use_gated_residual=False, use_mohsa=False, rope_theta=10000.0, use_recency_bias=False, weight_decay=0.1, use_rezero=False, max_lr=3e-4, freeze_embeddings=False, freeze_non_attn=False):
+def train_rpn_llm(start_step=0, checkpoint_path=None, model_type="rope", max_steps=80000, dataset_prefix="1-22_uniform_BOS", use_phase_mask=True, mlp_ratio=4, tau=1.0, use_gated_residual=False, use_mohsa=False, rope_theta=10000.0, use_recency_bias=False, weight_decay=0.1, use_rezero=False, max_lr=3e-4, freeze_embeddings=False, freeze_non_attn=False, use_focal_loss=False, focal_loss_gamma=2.0):
     device = 'cuda' if torch.cuda.is_available() else 'mps' if torch.backends.mps.is_available() else 'cpu'
     print(f"Using device: {device}")
 
@@ -339,9 +362,9 @@ def train_rpn_llm(start_step=0, checkpoint_path=None, model_type="rope", max_ste
         if model_type == "rdt":
             config = GPTConfig(vocab_size=64, n_prelude=1, n_coda=1, n_layer=6, n_head=8, n_embd=512, block_size=2048)
         elif model_type == "ut":
-            config = GPTConfig(vocab_size=64, n_layer=2, n_head=8, n_embd=384, block_size=2048, universal=True, tau=tau, use_phase_mask=use_phase_mask, mlp_ratio=mlp_ratio, use_gated_residual=use_gated_residual, use_mohsa=use_mohsa, rope_theta=rope_theta, use_recency_bias=use_recency_bias, bos_token_id=bos_id, phase_token_ids=phase_token_ids, use_rezero=use_rezero, freeze_embeddings=freeze_embeddings)
+            config = GPTConfig(vocab_size=64, n_layer=2, n_head=8, n_embd=384, block_size=2048, universal=True, tau=tau, use_phase_mask=use_phase_mask, mlp_ratio=mlp_ratio, use_gated_residual=use_gated_residual, use_mohsa=use_mohsa, rope_theta=rope_theta, use_recency_bias=use_recency_bias, bos_token_id=bos_id, phase_token_ids=phase_token_ids, use_rezero=use_rezero, freeze_embeddings=freeze_embeddings, use_focal_loss=use_focal_loss, focal_loss_gamma=focal_loss_gamma)
         elif model_type == "rope":
-            config = GPTConfig(vocab_size=64, n_layer=2, n_head=6, n_embd=192, block_size=2048, universal=False, use_phase_mask=use_phase_mask, mlp_ratio=mlp_ratio, use_gated_residual=use_gated_residual, use_mohsa=use_mohsa, bos_token_id=bos_id, phase_token_ids=phase_token_ids, use_rezero=use_rezero, freeze_embeddings=freeze_embeddings)
+            config = GPTConfig(vocab_size=64, n_layer=2, n_head=6, n_embd=192, block_size=2048, universal=False, use_phase_mask=use_phase_mask, mlp_ratio=mlp_ratio, use_gated_residual=use_gated_residual, use_mohsa=use_mohsa, bos_token_id=bos_id, phase_token_ids=phase_token_ids, use_rezero=use_rezero, freeze_embeddings=freeze_embeddings, use_focal_loss=use_focal_loss, focal_loss_gamma=focal_loss_gamma)
 
     model = GPT(config)
     
@@ -400,14 +423,14 @@ def train_rpn_llm(start_step=0, checkpoint_path=None, model_type="rope", max_ste
     warmup_steps = 1000
     
     def get_lr(it):
-        if start_step >= 200000:
-            if it < start_step:
-                return max_lr
-            if it > lr_decay_steps:
-                return min_lr
-            decay_ratio = (it - start_step) / (lr_decay_steps - start_step)
-            coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio))
-            return min_lr + (max_lr - min_lr) * coeff
+        # if start_step >= 200000:
+        #     if it < start_step:
+        #         return max_lr
+        #     if it > lr_decay_steps:
+        #         return min_lr
+        #     decay_ratio = (it - start_step) / (lr_decay_steps - start_step)
+        #     coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio))
+        #     return min_lr + (max_lr - min_lr) * coeff
             
         if it < warmup_steps:
             return max_lr * (it+1) / warmup_steps
@@ -471,7 +494,8 @@ def train_rpn_llm(start_step=0, checkpoint_path=None, model_type="rope", max_ste
                 # This prevents the model from being penalized for unpredictable sequence transitions
                 y_masked = y.clone()
                 y_masked[y_masked == 2] = -100
-                logits, loss = model(x, y_masked)
+                logits, loss = model(x, y_masked) 
+            
             loss = loss / grad_accum_steps
             loss_accum += loss.detach()
             loss.backward()
@@ -552,8 +576,10 @@ if __name__ == "__main__":
     parser.add_argument("--max_lr", type=float, default=3e-4, help="Peak learning rate")
     parser.add_argument("--freeze_embeddings", action="store_true", help="Freeze embedding weights during training")
     parser.add_argument("--freeze_non_attn", action="store_true", help="Freeze all layers except c_attn and c_proj for SFT recalibration")
+    parser.add_argument("--use_focal_loss", action="store_true", help="Enable focal loss to focus on hard tokens")
+    parser.add_argument("--focal_loss_gamma", type=float, default=2.0, help="Gamma parameter for focal loss")
     parser.set_defaults(use_phase_mask=True)
     
     args = parser.parse_args()
     
-    train_rpn_llm(args.start_step, args.checkpoint_path, args.model, args.max_steps, args.dataset, args.use_phase_mask, args.mlp_ratio, args.tau, args.use_gated_residual, args.use_mohsa, args.rope_theta, args.use_recency_bias, args.weight_decay, args.use_rezero, args.max_lr, args.freeze_embeddings, args.freeze_non_attn)
+    train_rpn_llm(args.start_step, args.checkpoint_path, args.model, args.max_steps, args.dataset, args.use_phase_mask, args.mlp_ratio, args.tau, args.use_gated_residual, args.use_mohsa, args.rope_theta, args.use_recency_bias, args.weight_decay, args.use_rezero, args.max_lr, args.freeze_embeddings, args.freeze_non_attn, args.use_focal_loss, args.focal_loss_gamma)
