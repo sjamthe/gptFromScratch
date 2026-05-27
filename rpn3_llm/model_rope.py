@@ -27,6 +27,8 @@ class GPTConfig:
     freeze_embeddings: bool = False # if True, freeze the embedding layer
     use_focal_loss: bool = False # if True, use focal loss to focus on hard tokens
     focal_loss_gamma: float = 2.0 # gamma parameter for focal loss
+    n_counter: int = 0 # number of CounterHead blocks
+    n_buckets: int = 8 # number of buckets for CounterHead
 
 # --- RoPE Implementation ---
 def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0):
@@ -356,12 +358,51 @@ class Block(nn.Module):
             
         return x, cache_out, weights
 
+class CounterHead(nn.Module):
+    def __init__(self, config: GPTConfig):
+        super().__init__()
+        self.query = nn.Linear(config.n_embd, config.n_buckets)
+        self.out_proj = nn.Linear(config.n_buckets, config.n_embd)
+        self.scale = nn.Parameter(torch.tensor(0.05)) # Learnable scale initialized to 0.05
+    
+    def forward(self, x, use_cache=False, cache_state=None):
+        # x: [B, T, D]
+        logits = self.query(x)           # [B, T, n_buckets]
+        
+        if self.training:
+            # Gumbel-Softmax with straight-through estimator (hard=True) and tau=1.0
+            affinities = F.gumbel_softmax(logits, tau=1.0, hard=True, dim=-1)
+        else:
+            # During evaluation/inference, use deterministic argmax (one-hot) to match the discrete training path
+            indices = logits.argmax(dim=-1)
+            affinities = F.one_hot(indices, num_classes=logits.size(-1)).to(logits.dtype)
+        
+        if use_cache:
+            if cache_state is None:
+                counts = affinities.cumsum(dim=1)
+            else:
+                prev_sum = cache_state[:, -1:, :]
+                counts = prev_sum + affinities
+            new_cache = counts if cache_state is None else torch.cat([cache_state, counts], dim=1)
+            out = self.scale * self.out_proj(counts)
+            return out, new_cache
+        else:
+            counts = affinities.cumsum(dim=1) # adds up the assignment vectors from the beginning of the time sequence (index 0) up to the current position 
+            out = self.scale * self.out_proj(counts)
+            return out, None
+
 class GPT(nn.Module):
     
     def __init__(self, config: GPTConfig):
         super().__init__()
         self.config = config
         
+        self.n_counter = getattr(config, 'n_counter', 0)
+        if self.n_counter > 0:
+            self.counter_heads = nn.ModuleList([
+                CounterHead(config) 
+                for _ in range(self.n_counter)
+            ])
         
         self.transformer = nn.ModuleDict({
             'wte': nn.Embedding(config.vocab_size, config.n_embd),
@@ -394,6 +435,13 @@ class GPT(nn.Module):
             self.register_buffer("freqs_cis", freqs_cis, persistent=False)
 
         self.apply(self._init_weights)
+
+        # Custom initialization for CounterHead query weights (higher std = 0.2) to help saturate Gumbel-Softmax early
+        if self.n_counter > 0:
+            for head in self.counter_heads:
+                nn.init.normal_(head.query.weight, mean=0.0, std=0.2)
+                if head.query.bias is not None:
+                    nn.init.zeros_(head.query.bias)
 
         if getattr(config, 'freeze_embeddings', False):
             self.transformer.wte.weight.requires_grad = False
@@ -455,6 +503,18 @@ class GPT(nn.Module):
         freqs_cis = self.freqs_cis
         present_key_values = [] if use_cache else None
         
+        # Apply CounterHead blocks (residual connection)
+        if self.n_counter > 0:
+            for i, head in enumerate(self.counter_heads):
+                cache_idx = i
+                cache_in = past_key_values[cache_idx] if (past_key_values is not None and cache_idx < len(past_key_values)) else None
+                
+                cnt_out, cache_out = head(x, use_cache=use_cache, cache_state=cache_in)
+                x = x + cnt_out
+                
+                if use_cache:
+                    present_key_values.append(cache_out)
+        
         all_weights = [] if return_attention else None
         
         # Universal vs Sequential loop
@@ -474,7 +534,7 @@ class GPT(nn.Module):
                 x = x + self.pass_emb[emb_idx].view(1, 1, -1)
                 
                 # Each pass in the universal loop gets its own KV cache entry
-                cache_idx = i
+                cache_idx = self.n_counter + i
                 cache_in = past_key_values[cache_idx] if (past_key_values is not None and cache_idx < len(past_key_values)) else None
                 h_mask = None
                 if head_mask is not None:
@@ -528,7 +588,8 @@ class GPT(nn.Module):
         else:
             # Standard model: num_passes/halt_threshold is ignored
             for i, block in enumerate(self.transformer.h):
-                cache_in = past_key_values[i] if past_key_values is not None else None
+                cache_idx = self.n_counter + i
+                cache_in = past_key_values[cache_idx] if (past_key_values is not None and cache_idx < len(past_key_values)) else None
                 x, cache_out, weights = block(x, block_freqs, use_cache=use_cache, cache_state=cache_in, return_attention=return_attention, attn_mask=attn_mask)
                 if use_cache:
                     present_key_values.append(cache_out)
