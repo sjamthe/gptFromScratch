@@ -39,8 +39,8 @@ class DataLoaderLite:
         else:
             self.tokenizer = tokenizer
             
-        bin_path = input_path + ".cnt.bin"
-        mask_path = input_path + ".mask.bin"
+        bin_path = f"{input_path}.T{T}.cnt.bin"
+        mask_path = f"{input_path}.T{T}.mask.bin"
         
         # Staleness check: recreate if txt is newer than bin
         is_stale = False
@@ -80,8 +80,8 @@ class DataLoaderLite:
             self.tokens_mmap = None
             self.mask_mmap = None
             return
-        bin_path = self.input_path + ".cnt.bin"
-        mask_path = self.input_path + ".mask.bin"
+        bin_path = f"{self.input_path}.T{self.T}.cnt.bin"
+        mask_path = f"{self.input_path}.T{self.T}.mask.bin"
         if os.path.exists(bin_path) and os.path.exists(mask_path):
             self.tokens_mmap = np.memmap(bin_path, dtype=np.uint16, mode='r')
             self.mask_mmap = np.memmap(mask_path, dtype=np.uint8, mode='r')
@@ -102,29 +102,49 @@ class DataLoaderLite:
         print(f"Shuffling {len(lines)} lines...")
         random.shuffle(lines)
         
-        # Encode line by line to be safer with memory
         all_tokens = []
         all_masks = []
-        sep_id = self.tokenizer.encode("?")[0]
-        nl_id = self.tokenizer.encode("\n")[0]
         
-        print("Tokenizing and building mask...")
+        sep_id = self.tokenizer.vocab.get("?")
+        nl_id = self.tokenizer.vocab.get("\n")
+        pad_id = self.tokenizer.vocab.get("[PAD]", 0)
+        
+        print(f"Tokenizing and building full-equation padded cache (T={self.T})...")
         for line in lines:
             # Clean spaces: strip leading/trailing and compress multiple spaces to one
             clean_line = re.sub(r'\s+', ' ', line.strip()) + '\n'
             line_tokens = self.tokenizer.encode(clean_line)
-            is_answer = False
+            
+            # Build mask: 0 for prompt, 1 for solution
+            is_solution = False
             line_mask = []
             for t in line_tokens:
-                if is_answer:
+                if is_solution:
                     line_mask.append(1)
-                    if t == nl_id: is_answer = False
+                    if t == nl_id:
+                        is_solution = False
                 else:
                     line_mask.append(0)
-                    if t == sep_id: is_answer = True
+                    if t == sep_id:
+                        is_solution = True
             
-            all_tokens.extend(line_tokens)
-            all_masks.extend(line_mask)
+            # Pad or truncate to self.T
+            if len(line_tokens) > self.T:
+                print(f"Warning: Equation length {len(line_tokens)} exceeds T={self.T}! Truncating.")
+                chunk_tokens = line_tokens[:self.T]
+                chunk_mask = line_mask[:self.T]
+            else:
+                pad_len = self.T - len(line_tokens)
+                chunk_tokens = line_tokens + [pad_id] * pad_len
+                chunk_mask = line_mask + [0] * pad_len
+                
+            all_tokens.extend(chunk_tokens)
+            all_masks.extend(chunk_mask)
+            
+        # Append exactly one extra padding element at the very end to prevent 
+        # out-of-bounds or skipping of the final batch by next_batch's "+ 1" lookahead.
+        all_tokens.append(pad_id)
+        all_masks.append(0)
             
         # Write to disk
         print(f"Saving to {bin_path}...")

@@ -384,11 +384,15 @@ class CounterHead(nn.Module):
                 prev_sum = cache_state[:, -1:, :]
                 counts = prev_sum + affinities
             new_cache = counts if cache_state is None else torch.cat([cache_state, counts], dim=1)
-            out = self.scale * self.out_proj(counts)
+            # Normalize counts to keep activations stable and prevent scale collapse
+            counts_norm = F.layer_norm(counts.float(), (counts.shape[-1],)).type_as(counts)
+            out = self.scale * self.out_proj(counts_norm)
             return out, new_cache
         else:
             counts = affinities.cumsum(dim=1) # adds up the assignment vectors from the beginning of the time sequence (index 0) up to the current position 
-            out = self.scale * self.out_proj(counts)
+            # Normalize counts to keep activations stable and prevent scale collapse
+            counts_norm = F.layer_norm(counts.float(), (counts.shape[-1],)).type_as(counts)
+            out = self.scale * self.out_proj(counts_norm)
             return out, None
 
 class GPT(nn.Module):

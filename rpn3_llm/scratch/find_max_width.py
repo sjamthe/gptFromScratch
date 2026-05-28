@@ -11,9 +11,15 @@ from utils import RPNTokenizer
 def find_max_widths():
     tokenizer = RPNTokenizer(os.path.join(project_dir, "rpn-tokenizer.json"))
     
+    # Get phase shift token IDs
+    rev_id = tokenizer.vocab.get("[REV]")
+    math_id = tokenizer.vocab.get("[MATH]")
+    ans_id = tokenizer.vocab.get("[ANS]")
+    phase_shift_ids = {rev_id, math_id, ans_id}
+    
     files = [
-        "rpn3_llm/data/sft_1-14_7num_BOS_pre_math_val.txt",
-        "rpn3_llm/data/sft_1-14_7num_BOS_pre_math_train.txt"
+        "rpn3_llm/data/sft_1-14_7num_BOS_val.txt",
+        "rpn3_llm/data/sft_1-14_7num_BOS_train.txt"
     ]
     
     for file_path in files:
@@ -22,7 +28,7 @@ def find_max_widths():
             print(f"File not found: {full_path}")
             continue
             
-        print(f"Analyzing {file_path}...")
+        print(f"Analyzing {file_path} (for max consecutive two-phase length)...")
         max_chars = 0
         max_tokens = 0
         longest_char_line = ""
@@ -34,22 +40,53 @@ def find_max_widths():
                 if not stripped:
                     continue
                 
-                # Character count
-                char_len = len(stripped)
-                if char_len > max_chars:
-                    max_chars = char_len
-                    longest_char_line = stripped
-                
-                # Token count
+                # Tokenize the line
                 tokens = tokenizer.encode(stripped + "\n")
-                token_len = len(tokens)
+                
+                # Split tokens into phases
+                phases = []
+                current_phase = []
+                for tok in tokens:
+                    if tok in phase_shift_ids:
+                        if current_phase:
+                            phases.append(current_phase)
+                        current_phase = [tok]
+                    else:
+                        current_phase.append(tok)
+                if current_phase:
+                    phases.append(current_phase)
+                
+                # 1. Compute max consecutive phase token length
+                phase_lens = [len(p) for p in phases]
+                if len(phase_lens) == 1:
+                    token_len = phase_lens[0]
+                elif len(phase_lens) > 1:
+                    token_len = max(phase_lens[i] + phase_lens[i+1] for i in range(len(phase_lens) - 1))
+                else:
+                    token_len = 0
+                    
                 if token_len > max_tokens:
                     max_tokens = token_len
                     longest_token_line = stripped
+                
+                # 2. Compute max consecutive phase character length
+                phase_strs = [tokenizer.decode(p) for p in phases]
+                phase_char_lens = [len(s) for s in phase_strs]
+                if len(phase_char_lens) == 1:
+                    char_len = phase_char_lens[0]
+                elif len(phase_char_lens) > 1:
+                    char_len = max(phase_char_lens[i] + phase_char_lens[i+1] for i in range(len(phase_char_lens) - 1))
+                else:
+                    char_len = 0
                     
-        print(f"  Max characters: {max_chars}")
-        print(f"  Max tokens:     {max_tokens}")
-        print(f"  Longest line:   {longest_token_line[:120]}...")
+                if char_len > max_chars:
+                    max_chars = char_len
+                    longest_char_line = stripped
+                    
+        print(f"  Max consecutive two-phase characters: {max_chars}")
+        print(f"  Max consecutive two-phase tokens:     {max_tokens}")
+        print(f"  Longest line (by tokens):   {longest_token_line[:120]}...")
+        print()
 
 if __name__ == "__main__":
     find_max_widths()

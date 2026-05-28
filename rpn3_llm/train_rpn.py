@@ -108,7 +108,7 @@ def run_teacher_forcing_validation(model, val_loader, device, step):
                     tok_y = y_cpu[b, t]
                     tok_p = preds_cpu[b, t]
 
-                    if tok_y in (unk_id, pad_id) or tok_y == nl_id:
+                    if tok_y == -100 or tok_y in (unk_id, pad_id) or tok_y == nl_id:
                         if tok_y == nl_id:
                             equation_finished = True
                         break
@@ -307,8 +307,8 @@ def train_rpn_llm(start_step=0, checkpoint_path=None, model_type="rope", max_ste
     if(torch.cuda.is_available()):
         torch.cuda.manual_seed(1337)
     
-    B = 64 # Increased batch size since context length is smaller
-    T = 256 # Fit maximum token length of 211 with buffer
+    B = 8
+    T = 2048
     total_batch_size = B*T
     assert total_batch_size % (B * T) == 0, "total_batch_size must be divisible by (B * T)"
     grad_accum_steps = total_batch_size // (B * T)
@@ -364,7 +364,7 @@ def train_rpn_llm(start_step=0, checkpoint_path=None, model_type="rope", max_ste
         if model_type == "rdt":
             config = GPTConfig(vocab_size=64, n_prelude=1, n_coda=1, n_layer=6, n_head=8, n_embd=512, block_size=T)
         elif model_type == "ut":
-            config = GPTConfig(vocab_size=64, n_layer=2, n_head=6, n_embd=192, block_size=T, universal=True, tau=tau, use_phase_mask=use_phase_mask, mlp_ratio=mlp_ratio, use_gated_residual=use_gated_residual, use_mohsa=use_mohsa, rope_theta=rope_theta, use_recency_bias=use_recency_bias, bos_token_id=bos_id, phase_token_ids=phase_token_ids, use_rezero=use_rezero, freeze_embeddings=freeze_embeddings, use_focal_loss=use_focal_loss, focal_loss_gamma=focal_loss_gamma, n_counter=n_counter, n_buckets=n_buckets)
+            config = GPTConfig(vocab_size=64, n_layer=2, n_head=8, n_embd=384, block_size=T, universal=True, tau=tau, use_phase_mask=use_phase_mask, mlp_ratio=mlp_ratio, use_gated_residual=use_gated_residual, use_mohsa=use_mohsa, rope_theta=rope_theta, use_recency_bias=use_recency_bias, bos_token_id=bos_id, phase_token_ids=phase_token_ids, use_rezero=use_rezero, freeze_embeddings=freeze_embeddings, use_focal_loss=use_focal_loss, focal_loss_gamma=focal_loss_gamma, n_counter=n_counter, n_buckets=n_buckets)
         elif model_type == "rope":
             config = GPTConfig(vocab_size=64, n_layer=2, n_head=6, n_embd=192, block_size=T, universal=False, use_phase_mask=use_phase_mask, mlp_ratio=mlp_ratio, use_gated_residual=use_gated_residual, use_mohsa=use_mohsa, bos_token_id=bos_id, phase_token_ids=phase_token_ids, use_rezero=use_rezero, freeze_embeddings=freeze_embeddings, use_focal_loss=use_focal_loss, focal_loss_gamma=focal_loss_gamma, n_counter=n_counter, n_buckets=n_buckets)
 
@@ -424,7 +424,7 @@ def train_rpn_llm(start_step=0, checkpoint_path=None, model_type="rope", max_ste
     
     lr_decay_steps = 200000
     min_lr = max_lr * 0.1
-    warmup_steps = 10000
+    warmup_steps = 1000
     
     def get_lr(it):
         # if start_step >= 200000:
@@ -567,7 +567,7 @@ if __name__ == "__main__":
     parser.add_argument("checkpoint_path", type=str, nargs="?", default=None, help="Path to checkpoint")
     parser.add_argument("--model", type=str, default="ut", choices=["rope", "ut", "rdt"], help="Model architecture to train")
     parser.add_argument("--max_steps", type=int, default=200000, help="Total steps to train for (default 80000)")
-    parser.add_argument("--dataset", type=str, default="sft_1-14_7num_BOS_pre_math", help="Dataset prefix")
+    parser.add_argument("--dataset", type=str, default="sft_1-14_7num_BOS", help="Dataset prefix")
     parser.add_argument("--no_phase_mask", action="store_false", dest="use_phase_mask", help="Disable sequential phase masking")
     parser.add_argument("--mlp_ratio", type=int, default=4, help="MLP expansion ratio (default 4)")
     parser.add_argument("--tau", type=float, default=1.0, help="Tau for sharp focus in attention (default 1.0)")
