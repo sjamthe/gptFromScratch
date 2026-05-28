@@ -4,7 +4,12 @@ import argparse
 from utils import RPNTokenizer
 
 def generate_number(length):
-    return "".join([str(random.randint(1, 9)) for _ in range(length)])
+    if length <= 0:
+        return ""
+    if length == 1:
+        return str(random.randint(0, 9))
+    else:
+        return str(random.randint(1, 9)) + "".join([str(random.randint(0, 9)) for _ in range(length - 1)])
 
 def reverse_string(s):
     return s[::-1]
