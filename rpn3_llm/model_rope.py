@@ -1,5 +1,5 @@
 from torch.nn.functional import leaky_relu
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import torch
 from torch import nn
 from torch.nn import functional as F
@@ -35,8 +35,8 @@ class GPTConfig:
     #   n_counter=1, counter_inject_layers=[-1]        -> one head before all layers (original behavior)
     #   n_counter=2, counter_inject_layers=[-1, 0]     -> one head before layers, one after block 0
     #   n_counter=3, counter_inject_layers=[-1, 0, 2]  -> before layers, after block 0, after block 2
-    counter_inject_layers: list = [-1, 0, 1]   # defaults to [-1] * n_counter if not set
-
+    counter_inject_layers: list = field(default=None)
+    
 # --- RoPE Implementation ---
 def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0):
     freqs = 1.0 / (theta ** (torch.arange(0, dim, 2)[: (dim // 2)].float() / dim))
