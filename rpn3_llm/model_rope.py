@@ -424,6 +424,12 @@ class GPT(nn.Module):
                     f"got {len(raw_inject)}"
                 )
                 self.counter_inject_layers = list(raw_inject)
+            # check config is correct
+            for layer_idx in self.counter_inject_layers:
+                assert layer_idx == -1 or 0 <= layer_idx < config.n_layer, (
+                    f"counter_inject_layers entry {layer_idx} out of range "
+                    f"[-1, {config.n_layer - 1}]"
+                )
             # Build lookup: layer_index -> list of head indices to inject at that point
             # layer_index = -1 means before all transformer blocks
             self._counter_inject_map = {}
