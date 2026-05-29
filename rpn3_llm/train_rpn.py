@@ -308,7 +308,7 @@ def train_rpn_llm(start_step=0, checkpoint_path=None, model_type="rope", max_ste
         torch.cuda.manual_seed(1337)
     
     B = 8
-    T = 2048
+    T = 512
     total_batch_size = B*T
     assert total_batch_size % (B * T) == 0, "total_batch_size must be divisible by (B * T)"
     grad_accum_steps = total_batch_size // (B * T)
@@ -566,8 +566,8 @@ if __name__ == "__main__":
     parser.add_argument("start_step", type=int, nargs="?", default=0, help="Step to resume from")
     parser.add_argument("checkpoint_path", type=str, nargs="?", default=None, help="Path to checkpoint")
     parser.add_argument("--model", type=str, default="ut", choices=["rope", "ut", "rdt"], help="Model architecture to train")
-    parser.add_argument("--max_steps", type=int, default=200000, help="Total steps to train for (default 80000)")
-    parser.add_argument("--dataset", type=str, default="sft_1-14_7num_BOS", help="Dataset prefix")
+    parser.add_argument("--max_steps", type=int, default=200000, help="Total steps to train for (default 200000)")
+    parser.add_argument("--dataset", type=str, default="sft_1-6_4num_BOS", help="Dataset prefix")
     parser.add_argument("--no_phase_mask", action="store_false", dest="use_phase_mask", help="Disable sequential phase masking")
     parser.add_argument("--mlp_ratio", type=int, default=4, help="MLP expansion ratio (default 4)")
     parser.add_argument("--tau", type=float, default=1.0, help="Tau for sharp focus in attention (default 1.0)")

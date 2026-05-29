@@ -31,6 +31,7 @@ def find_max_widths():
         print(f"Analyzing {file_path} (for max consecutive two-phase length)...")
         max_chars = 0
         max_tokens = 0
+        max_all_tokens = 0
         longest_char_line = ""
         longest_token_line = ""
         
@@ -42,6 +43,8 @@ def find_max_widths():
                 
                 # Tokenize the line
                 tokens = tokenizer.encode(stripped + "\n")
+                if max_all_tokens < len(tokens) :
+                    max_all_tokens = len(tokens)
                 
                 # Split tokens into phases
                 phases = []
@@ -86,6 +89,7 @@ def find_max_widths():
         print(f"  Max consecutive two-phase characters: {max_chars}")
         print(f"  Max consecutive two-phase tokens:     {max_tokens}")
         print(f"  Longest line (by tokens):   {longest_token_line[:120]}...")
+        print("Max all tokens: ", max_all_tokens)
         print()
 
 if __name__ == "__main__":

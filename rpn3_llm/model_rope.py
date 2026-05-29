@@ -29,6 +29,13 @@ class GPTConfig:
     focal_loss_gamma: float = 2.0 # gamma parameter for focal loss
     n_counter: int = 0 # number of CounterHead blocks
     n_buckets: int = 8 # number of buckets for CounterHead
+    # Injection points for CounterHeads. Use -1 for before all transformer layers.
+    # Use 0..n_layer-1 to inject after that block index.
+    # Must have exactly n_counter entries. Examples:
+    #   n_counter=1, counter_inject_layers=[-1]        -> one head before all layers (original behavior)
+    #   n_counter=2, counter_inject_layers=[-1, 0]     -> one head before layers, one after block 0
+    #   n_counter=3, counter_inject_layers=[-1, 0, 2]  -> before layers, after block 0, after block 2
+    counter_inject_layers: list = [-1, 0, 1]   # defaults to [-1] * n_counter if not set
 
 # --- RoPE Implementation ---
 def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0):
@@ -407,6 +414,24 @@ class GPT(nn.Module):
                 CounterHead(config) 
                 for _ in range(self.n_counter)
             ])
+            # Resolve injection layers: default all heads to -1 (before transformer)
+            raw_inject = getattr(config, 'counter_inject_layers', None)
+            if raw_inject is None:
+                self.counter_inject_layers = [-1] * self.n_counter
+            else:
+                assert len(raw_inject) == self.n_counter, (
+                    f"counter_inject_layers must have exactly n_counter={self.n_counter} entries, "
+                    f"got {len(raw_inject)}"
+                )
+                self.counter_inject_layers = list(raw_inject)
+            # Build lookup: layer_index -> list of head indices to inject at that point
+            # layer_index = -1 means before all transformer blocks
+            self._counter_inject_map = {}
+            for head_idx, layer_idx in enumerate(self.counter_inject_layers):
+                self._counter_inject_map.setdefault(layer_idx, []).append(head_idx)
+        else:
+            self.counter_inject_layers = []
+            self._counter_inject_map = {}
         
         self.transformer = nn.ModuleDict({
             'wte': nn.Embedding(config.vocab_size, config.n_embd),
@@ -505,20 +530,34 @@ class GPT(nn.Module):
         x = self.transformer.wte(idx)
         
         freqs_cis = self.freqs_cis
-        present_key_values = [] if use_cache else None
-        
-        # Apply CounterHead blocks (residual connection)
-        if self.n_counter > 0:
-            for i, head in enumerate(self.counter_heads):
-                cache_idx = i
-                cache_in = past_key_values[cache_idx] if (past_key_values is not None and cache_idx < len(past_key_values)) else None
-                
+        # present_key_values must be pre-allocated in slot order:
+        #   slots 0..n_counter-1         -> CounterHead caches (one per head, in head index order)
+        #   slots n_counter..n_counter+n_layer-1 -> transformer block KV caches
+        # We pre-fill with None so mid-loop heads can write to their slot by index.
+        present_key_values = [None] * (self.n_counter + self.config.n_layer) if use_cache else None
+
+        def _apply_counter_heads_at(layer_idx, x):
+            """Inject all CounterHeads registered at layer_idx into x (residual add).
+            Updates present_key_values in-place if use_cache is True.
+            layer_idx == -1 means before all transformer blocks."""
+            heads_at = self._counter_inject_map.get(layer_idx, [])
+            for head_idx in heads_at:
+                head = self.counter_heads[head_idx]
+                cache_slot = head_idx  # CounterHead cache slots are 0..n_counter-1
+                cache_in = (
+                    past_key_values[cache_slot]
+                    if (past_key_values is not None and cache_slot < len(past_key_values))
+                    else None
+                )
                 cnt_out, cache_out = head(x, use_cache=use_cache, cache_state=cache_in)
                 x = x + cnt_out
-                
                 if use_cache:
-                    present_key_values.append(cache_out)
-        
+                    present_key_values[cache_slot] = cache_out
+            return x
+
+        # --- Inject CounterHeads registered at layer -1 (before transformer) ---
+        x = _apply_counter_heads_at(-1, x)
+
         all_weights = [] if return_attention else None
         
         # Universal vs Sequential loop
@@ -547,9 +586,12 @@ class GPT(nn.Module):
                 x, cache_out, weights = self.transformer.h(x, block_freqs, use_cache=use_cache, cache_state=cache_in, return_attention=return_attention, attn_mask=attn_mask, head_mask=h_mask)
                 
                 if use_cache:
-                    present_key_values.append(cache_out)
+                    present_key_values[cache_idx] = cache_out
                 if return_attention:
                     all_weights.append(weights)
+
+                # --- Inject CounterHeads registered after this pass index ---
+                x = _apply_counter_heads_at(i, x)
                 
                 # --- Logit Stability Halting ---
                 if halt_on_logit_stability is not None:
@@ -569,8 +611,8 @@ class GPT(nn.Module):
                     if stable_count >= halt_on_logit_stability:
                         # Logit is stable! Pad and break.
                         if use_cache:
-                            for _ in range(i + 1, max_passes):
-                                present_key_values.append(cache_out)
+                            for j in range(i + 1, max_passes):
+                                present_key_values[self.n_counter + j] = cache_out
                         if return_attention:
                             for _ in range(i + 1, max_passes):
                                 all_weights.append(weights)
@@ -581,8 +623,8 @@ class GPT(nn.Module):
                     diff = torch.norm(x - prev_x, p=2, dim=-1).mean()
                     if diff < halt_threshold:
                         if use_cache:
-                            for _ in range(i + 1, max_passes):
-                                present_key_values.append(cache_out)
+                            for j in range(i + 1, max_passes):
+                                present_key_values[self.n_counter + j] = cache_out
                         if return_attention:
                             for _ in range(i + 1, max_passes):
                                 all_weights.append(weights)
@@ -596,9 +638,12 @@ class GPT(nn.Module):
                 cache_in = past_key_values[cache_idx] if (past_key_values is not None and cache_idx < len(past_key_values)) else None
                 x, cache_out, weights = block(x, block_freqs, use_cache=use_cache, cache_state=cache_in, return_attention=return_attention, attn_mask=attn_mask)
                 if use_cache:
-                    present_key_values.append(cache_out)
+                    present_key_values[cache_idx] = cache_out
                 if return_attention:
                     all_weights.append(weights)
+
+                # --- Inject CounterHeads registered after block i ---
+                x = _apply_counter_heads_at(i, x)
             
         x = self.transformer.ln_f(x)
         
