@@ -18,8 +18,7 @@ def find_max_widths():
     phase_shift_ids = {rev_id, math_id, ans_id}
     
     files = [
-        "rpn3_llm/data/sft_1-14_7num_BOS_val.txt",
-        "rpn3_llm/data/sft_1-14_7num_BOS_train.txt"
+        "rpn3_llm/data/rpn3_ood_len_val.txt",
     ]
     
     for file_path in files:

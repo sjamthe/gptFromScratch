@@ -191,6 +191,7 @@ def main():
     parser.add_argument("--max_numbers", type=int, default=3, help="Maximum number of operands")
     parser.add_argument("--max_digits", type=int, default=22, help="Maximum digits per operand")
     parser.add_argument("--prefix", type=str, default="rpn3", help="Prefix for output files")
+    parser.add_argument("--max_token_length", type=int, default=2040, help="Maximum token length per sample")
     args = parser.parse_args()
     
     os.makedirs(args.output_dir, exist_ok=True)
@@ -205,7 +206,7 @@ def main():
 
     script_dir = os.path.dirname(os.path.abspath(__file__))
     tokenizer = RPNTokenizer(os.path.join(script_dir, "rpn-tokenizer.json"))
-    max_tokens = 2040
+    max_tokens = args.max_token_length
 
     for i in range(args.samples):
         while True:
