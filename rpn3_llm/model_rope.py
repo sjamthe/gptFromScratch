@@ -415,7 +415,7 @@ class CoordinateHead(nn.Module):
         self.q_proj = nn.Linear(self.n_embd, self.n_heads * self.head_dim)
         self.k_proj = nn.Linear(self.n_embd, self.n_heads * self.head_dim)
         self.out_proj = nn.Linear(self.n_heads, self.n_embd)
-        self.scale = nn.Parameter(torch.tensor(0.05)) # Learnable scale initialized to 0.05
+        self.scale = nn.Parameter(torch.tensor(0.5)) # Learnable scale initialized to 0.5 (reduced gradient bottleneck)
         self.block_size = config.block_size
 
     def forward(self, x, use_cache=False, cache_state=None, attn_mask=None):
@@ -585,6 +585,16 @@ class GPT(nn.Module):
                 nn.init.normal_(head.query.weight, mean=0.0, std=0.2)
                 if head.query.bias is not None:
                     nn.init.zeros_(head.query.bias)
+
+        # Custom initialization for CoordinateHead query/key weights (higher std = 0.1) for healthy initial attention spread
+        if self.n_coord > 0:
+            for head in self.coordinate_heads:
+                nn.init.normal_(head.q_proj.weight, mean=0.0, std=0.1)
+                nn.init.normal_(head.k_proj.weight, mean=0.0, std=0.1)
+                if head.q_proj.bias is not None:
+                    nn.init.zeros_(head.q_proj.bias)
+                if head.k_proj.bias is not None:
+                    nn.init.zeros_(head.k_proj.bias)
 
         if getattr(config, 'freeze_embeddings', False):
             self.transformer.wte.weight.requires_grad = False
@@ -827,8 +837,14 @@ class GPT(nn.Module):
     def configure_optimizers(self, weight_decay, learning_rate, device):
         param_dict = dict(self.named_parameters())
         param_dict = {k: v for k, v in param_dict.items() if v.requires_grad}
-        decay_params = [p for k, p in param_dict.items() if p.dim() >= 2]
-        no_decay_params = [p for k, p in param_dict.items() if p.dim() < 2]
+        # Decay parameters with dim >= 2, except coordinate head q_proj and k_proj weights to avoid weight decay shriveling
+        decay_params = []
+        no_decay_params = []
+        for k, p in param_dict.items():
+            if p.dim() >= 2 and not ("coordinate_heads" in k and ("q_proj" in k or "k_proj" in k)):
+                decay_params.append(p)
+            else:
+                no_decay_params.append(p)
         optim_groups = [
             {'params': decay_params, 'weight_decay': weight_decay},
             {'params': no_decay_params, 'weight_decay': 0.0}

@@ -365,16 +365,21 @@ def train_rpn_llm(start_step=0, checkpoint_path=None, model_type="rope", max_ste
             config = GPTConfig(vocab_size=64, n_prelude=1, n_coda=1, n_layer=6, n_head=8, n_embd=512, block_size=T)
         elif model_type == "ut":
             config = GPTConfig(vocab_size=64, n_layer=2, n_head=8, n_embd=384, block_size=T, universal=True, tau=tau, use_phase_mask=use_phase_mask, mlp_ratio=mlp_ratio, use_gated_residual=use_gated_residual, use_mohsa=use_mohsa, rope_theta=rope_theta, use_recency_bias=use_recency_bias, bos_token_id=bos_id, phase_token_ids=phase_token_ids, use_rezero=use_rezero, freeze_embeddings=freeze_embeddings, use_focal_loss=use_focal_loss, focal_loss_gamma=focal_loss_gamma, n_counter=n_counter, n_buckets=n_buckets, n_coord=n_coord, n_coord_heads=n_coord_heads)
-            if n_counter == 3:
-                config.counter_inject_layers = [-1, 0, 1]
-            if n_coord == 3:
-                config.coord_inject_layers = [-1, 0, 1]
         elif model_type == "rope":
             config = GPTConfig(vocab_size=64, n_layer=2, n_head=6, n_embd=192, block_size=T, universal=False, use_phase_mask=use_phase_mask, mlp_ratio=mlp_ratio, use_gated_residual=use_gated_residual, use_mohsa=use_mohsa, bos_token_id=bos_id, phase_token_ids=phase_token_ids, use_rezero=use_rezero, freeze_embeddings=freeze_embeddings, use_focal_loss=use_focal_loss, focal_loss_gamma=focal_loss_gamma, n_counter=n_counter, n_buckets=n_buckets, n_coord=n_coord, n_coord_heads=n_coord_heads)
-            if n_counter == 3:
-                config.counter_inject_layers = [-1, 0, 1]
-            if n_coord == 3:
-                config.coord_inject_layers = [-1, 0, 1]
+
+        if n_counter == 3:
+            config.counter_inject_layers = [-1, 0, 1]
+        elif n_counter == 2:
+            config.counter_inject_layers = [-1, 0]
+        elif n_counter == 1:
+            config.counter_inject_layers = [-1]
+        if n_coord == 3:
+            config.coord_inject_layers = [-1, 0, 1]
+        elif n_coord == 2:
+            config.coord_inject_layers = [-1, 0]
+        elif n_coord == 1:
+            config.coord_inject_layers = [-1]
 
     model = GPT(config)
     
@@ -566,6 +571,13 @@ def train_rpn_llm(start_step=0, checkpoint_path=None, model_type="rope", max_ste
    
     wandb.finish()
     if (step+1) % 8000 != 0:
+        checkpoint = {
+            'model': model.state_dict(),
+            'optimizer': optimizer.state_dict(),
+            'config': model.config,
+            'step': step,
+            'train_loader': train_loader,
+        }   
         torch.save(checkpoint, os.path.join(model_dir, f'{run_name}_{step+1}.pt'))
         print(f"Model checkpoint saved to {os.path.join(model_dir, f'{run_name}_{step+1}.pt')}")
 

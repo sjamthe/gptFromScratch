@@ -18,4 +18,5 @@ scratch.py
 test_len.py
 test_data/
 */scratch/*.png
+*/scratch/*.txt
 */scratch/*/*.png
