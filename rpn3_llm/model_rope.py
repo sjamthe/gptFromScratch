@@ -28,7 +28,7 @@ class GPTConfig:
     use_focal_loss: bool = False # if True, use focal loss to focus on hard tokens
     focal_loss_gamma: float = 2.0 # gamma parameter for focal loss
     n_counter: int = 0 # number of CounterHead blocks
-    n_buckets: int = 8 # number of buckets for CounterHead
+    n_buckets: int = 4 # number of buckets for CounterHead
     # Injection points for CounterHeads. Use -1 for before all transformer layers.
     # Use 0..n_layer-1 to inject after that block index.
     # Must have exactly n_counter entries. Examples:
@@ -36,6 +36,9 @@ class GPTConfig:
     #   n_counter=2, counter_inject_layers=[-1, 0]     -> one head before layers, one after block 0
     #   n_counter=3, counter_inject_layers=[-1, 0, 2]  -> before layers, after block 0, after block 2
     counter_inject_layers: list = field(default=None)
+    n_coord: int = 0 # number of CoordinateHead blocks
+    n_coord_heads: int = 4 # number of heads in CoordinateHead
+    coord_inject_layers: list = field(default=None)
     
 # --- RoPE Implementation ---
 def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0):
@@ -402,6 +405,84 @@ class CounterHead(nn.Module):
             out = self.scale * self.out_proj(counts_norm)
             return out, None
 
+class CoordinateHead(nn.Module):
+    def __init__(self, config: GPTConfig):
+        super().__init__()
+        self.n_heads = getattr(config, 'n_coord_heads', 4)
+        self.n_embd = config.n_embd
+        self.head_dim = self.n_embd // config.n_head
+        
+        self.q_proj = nn.Linear(self.n_embd, self.n_heads * self.head_dim)
+        self.k_proj = nn.Linear(self.n_embd, self.n_heads * self.head_dim)
+        self.out_proj = nn.Linear(self.n_heads, self.n_embd)
+        self.scale = nn.Parameter(torch.tensor(0.05)) # Learnable scale initialized to 0.05
+        self.block_size = config.block_size
+
+    def forward(self, x, use_cache=False, cache_state=None, attn_mask=None):
+        # x: [B, T, D]
+        B, T, C = x.size()
+        
+        q = self.q_proj(x)           # [B, T, n_heads * head_dim]
+        k = self.k_proj(x)           # [B, T, n_heads * head_dim]
+        
+        # Reshape for multi-head attention: [B, n_heads, T, head_dim]
+        q = q.view(B, T, self.n_heads, self.head_dim).transpose(1, 2)
+        k = k.view(B, T, self.n_heads, self.head_dim).transpose(1, 2)
+        
+        offset = 0
+        if use_cache:
+            if cache_state is not None:
+                k_cache = cache_state
+                k = torch.cat([k_cache, k], dim=2)
+                offset = k_cache.size(2)
+            new_cache = k
+        else:
+            new_cache = None
+            
+        T_total = k.size(2)
+        
+        # Compute query-key scores
+        scores = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(self.head_dim))
+        
+        # Causal mask based on absolute indices
+        q_idx = torch.arange(offset, offset + T, device=x.device).view(-1, 1)
+        k_idx = torch.arange(T_total, device=x.device).view(1, -1)
+        causal_mask = q_idx < k_idx  # [T, T_total]
+        
+        if attn_mask is not None:
+            if attn_mask.dtype == torch.bool:
+                mask = causal_mask | ~attn_mask.squeeze(1)
+            else:
+                mask = causal_mask
+        else:
+            mask = causal_mask
+            
+        scores = scores.masked_fill(mask.unsqueeze(1), float('-inf'))
+        
+        if attn_mask is not None and attn_mask.dtype != torch.bool:
+            # Handle float (e.g. logit-space additive) masking
+            scores = scores + attn_mask
+            
+        # Attention weights
+        attn_probs = F.softmax(scores, dim=-1)  # [B, n_heads, T, T_total]
+        
+        # Compute relative position distance (i - j)
+        dist = q_idx - k_idx  # [T, T_total]
+        
+        # Translate to [-1, 1] relative to block_size
+        dist_norm = 2.0 * dist.float() / self.block_size - 1.0
+        
+        # Compute expected distance per head: [B, n_heads, T]
+        expected_dist = (attn_probs * dist_norm.unsqueeze(0).unsqueeze(1)).sum(dim=-1)
+        
+        # Reshape to [B, T, n_heads]
+        expected_dist = expected_dist.transpose(1, 2)
+        
+        # Project and scale back to embedding dimension
+        out = self.scale * self.out_proj(expected_dist)
+        
+        return out, new_cache
+
 class GPT(nn.Module):
     
     def __init__(self, config: GPTConfig):
@@ -438,6 +519,33 @@ class GPT(nn.Module):
         else:
             self.counter_inject_layers = []
             self._counter_inject_map = {}
+            
+        self.n_coord = getattr(config, 'n_coord', 0)
+        if self.n_coord > 0:
+            self.coordinate_heads = nn.ModuleList([
+                CoordinateHead(config) 
+                for _ in range(self.n_coord)
+            ])
+            raw_inject = getattr(config, 'coord_inject_layers', None)
+            if raw_inject is None:
+                self.coord_inject_layers = [-1] * self.n_coord
+            else:
+                assert len(raw_inject) == self.n_coord, (
+                    f"coord_inject_layers must have exactly n_coord={self.n_coord} entries, "
+                    f"got {len(raw_inject)}"
+                )
+                self.coord_inject_layers = list(raw_inject)
+            for layer_idx in self.coord_inject_layers:
+                assert layer_idx == -1 or 0 <= layer_idx < config.n_layer, (
+                    f"coord_inject_layers entry {layer_idx} out of range "
+                    f"[-1, {config.n_layer - 1}]"
+                )
+            self._coord_inject_map = {}
+            for head_idx, layer_idx in enumerate(self.coord_inject_layers):
+                self._coord_inject_map.setdefault(layer_idx, []).append(head_idx)
+        else:
+            self.coord_inject_layers = []
+            self._coord_inject_map = {}
         
         self.transformer = nn.ModuleDict({
             'wte': nn.Embedding(config.vocab_size, config.n_embd),
@@ -540,7 +648,7 @@ class GPT(nn.Module):
         #   slots 0..n_counter-1         -> CounterHead caches (one per head, in head index order)
         #   slots n_counter..n_counter+n_layer-1 -> transformer block KV caches
         # We pre-fill with None so mid-loop heads can write to their slot by index.
-        present_key_values = [None] * (self.n_counter + self.config.n_layer) if use_cache else None
+        present_key_values = [None] * (self.n_counter + self.n_coord + self.config.n_layer) if use_cache else None
 
         def _apply_counter_heads_at(layer_idx, x):
             """Inject all CounterHeads registered at layer_idx into x (residual add).
@@ -561,8 +669,29 @@ class GPT(nn.Module):
                     present_key_values[cache_slot] = cache_out
             return x
 
+        def _apply_coordinate_heads_at(layer_idx, x, attn_mask=None):
+            """Inject all CoordinateHeads registered at layer_idx into x (residual add).
+            Updates present_key_values in-place if use_cache is True.
+            layer_idx == -1 means before all transformer blocks."""
+            heads_at = self._coord_inject_map.get(layer_idx, [])
+            for head_idx in heads_at:
+                head = self.coordinate_heads[head_idx]
+                cache_slot = self.n_counter + head_idx
+                cache_in = (
+                    past_key_values[cache_slot]
+                    if (past_key_values is not None and cache_slot < len(past_key_values))
+                    else None
+                )
+                crd_out, cache_out = head(x, use_cache=use_cache, cache_state=cache_in, attn_mask=attn_mask)
+                x = x + crd_out
+                if use_cache:
+                    present_key_values[cache_slot] = cache_out
+            return x
+
         # --- Inject CounterHeads registered at layer -1 (before transformer) ---
         x = _apply_counter_heads_at(-1, x)
+        # --- Inject CoordinateHeads registered at layer -1 ---
+        x = _apply_coordinate_heads_at(-1, x, attn_mask)
 
         all_weights = [] if return_attention else None
         
@@ -583,7 +712,7 @@ class GPT(nn.Module):
                 x = x + self.pass_emb[emb_idx].view(1, 1, -1)
                 
                 # Each pass in the universal loop gets its own KV cache entry
-                cache_idx = self.n_counter + i
+                cache_idx = self.n_counter + self.n_coord + i
                 cache_in = past_key_values[cache_idx] if (past_key_values is not None and cache_idx < len(past_key_values)) else None
                 h_mask = None
                 if head_mask is not None:
@@ -598,6 +727,8 @@ class GPT(nn.Module):
 
                 # --- Inject CounterHeads registered after this pass index ---
                 x = _apply_counter_heads_at(i, x)
+                # --- Inject CoordinateHeads registered after this pass index ---
+                x = _apply_coordinate_heads_at(i, x, attn_mask)
                 
                 # --- Logit Stability Halting ---
                 if halt_on_logit_stability is not None:
@@ -618,7 +749,7 @@ class GPT(nn.Module):
                         # Logit is stable! Pad and break.
                         if use_cache:
                             for j in range(i + 1, max_passes):
-                                present_key_values[self.n_counter + j] = cache_out
+                                present_key_values[self.n_counter + self.n_coord + j] = cache_out
                         if return_attention:
                             for _ in range(i + 1, max_passes):
                                 all_weights.append(weights)
@@ -630,7 +761,7 @@ class GPT(nn.Module):
                     if diff < halt_threshold:
                         if use_cache:
                             for j in range(i + 1, max_passes):
-                                present_key_values[self.n_counter + j] = cache_out
+                                present_key_values[self.n_counter + self.n_coord + j] = cache_out
                         if return_attention:
                             for _ in range(i + 1, max_passes):
                                 all_weights.append(weights)
@@ -640,7 +771,7 @@ class GPT(nn.Module):
         else:
             # Standard model: num_passes/halt_threshold is ignored
             for i, block in enumerate(self.transformer.h):
-                cache_idx = self.n_counter + i
+                cache_idx = self.n_counter + self.n_coord + i
                 cache_in = past_key_values[cache_idx] if (past_key_values is not None and cache_idx < len(past_key_values)) else None
                 x, cache_out, weights = block(x, block_freqs, use_cache=use_cache, cache_state=cache_in, return_attention=return_attention, attn_mask=attn_mask)
                 if use_cache:
@@ -650,6 +781,8 @@ class GPT(nn.Module):
 
                 # --- Inject CounterHeads registered after block i ---
                 x = _apply_counter_heads_at(i, x)
+                # --- Inject CoordinateHeads registered after block i ---
+                x = _apply_coordinate_heads_at(i, x, attn_mask)
             
         x = self.transformer.ln_f(x)
         
