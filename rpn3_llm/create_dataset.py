@@ -145,7 +145,7 @@ def generate_example(max_numbers=3, max_digits=22):
     rev_numbers = [reverse_string(n) for n in numbers]
     reversal = f"[REV]{rev_numbers[0]}"
     if num_count > 1:
-        reversal += f"[SEP]{rev_numbers[1]}{ops[0]}="
+        reversal += f"[SEP]{rev_numbers[1]}{ops[0]}" # Removed = after ops[0]
     for i in range(2, num_count):
         reversal += f"[SEP]{rev_numbers[i]}{ops[i-1]}"
     
