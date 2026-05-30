@@ -837,11 +837,14 @@ class GPT(nn.Module):
     def configure_optimizers(self, weight_decay, learning_rate, device):
         param_dict = dict(self.named_parameters())
         param_dict = {k: v for k, v in param_dict.items() if v.requires_grad}
-        # Decay parameters with dim >= 2, except coordinate head q_proj and k_proj weights to avoid weight decay shriveling
+        # Decay parameters with dim >= 2, except coordinate and counter head weights to avoid weight decay shriveling
         decay_params = []
         no_decay_params = []
         for k, p in param_dict.items():
-            if p.dim() >= 2 and not ("coordinate_heads" in k and ("q_proj" in k or "k_proj" in k)):
+            if p.dim() >= 2 and not (
+                ("coordinate_heads" in k and ("q_proj" in k or "k_proj" in k)) or
+                ("counter_heads" in k and ("query" in k or "out_proj" in k))
+            ):
                 decay_params.append(p)
             else:
                 no_decay_params.append(p)
