@@ -92,7 +92,7 @@ def analyze_checkpoint(checkpoint_path, tokenizer_path):
             # and show their top 5 preferred key tokens.
             interesting_tokens = [
                 "[UNK]","[BOS]", "[EOS]","[SEP]", "[REV]", "[BORROW]","[PASS]", "[MATH]", "[ANS]", " ", "+", "-",
-                "0", "1", "2", "3", "4", "5", "6", "7", "8", "9"
+                "0", "1", "2", "3", "4", "5", "6", "7", "8", "9","=",":","|"
             ]
 
             # Find the token IDs for interesting tokens

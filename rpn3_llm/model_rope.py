@@ -807,10 +807,13 @@ class GPT(nn.Module):
                 else:
                     is_phase_shift_local = (idx == 10) | (idx == 11) | (idx == 12)
                 global_phase_ids_local = is_phase_shift_local.cumsum(dim=-1)
-                is_rev_phase = (global_phase_ids_local == 1) # [B, T]
+                max_phase_local = global_phase_ids_local[:, -1:] # (B, 1)
+                is_rev_phase = (global_phase_ids_local % 2 == 1) | ((global_phase_ids_local == max_phase_local) & (global_phase_ids_local > 0))
             else:
                 if full_phase_ids is not None:
-                    is_rev_phase = (full_phase_ids[:, -1:] == 1) # [B, 1]
+                    current_phase_ids = full_phase_ids[:, -1:] # (B, 1)
+                    max_phase_local = full_phase_ids.max(dim=-1, keepdim=True).values # (B, 1)
+                    is_rev_phase = (current_phase_ids % 2 == 1) | ((current_phase_ids == max_phase_local) & (current_phase_ids > 0))
                 else:
                     is_rev_phase = torch.zeros((B, 1), dtype=torch.bool, device=idx.device)
 

@@ -76,8 +76,8 @@ def analyze_coordinate_attention_by_phase(checkpoint_path, num_examples=100, tok
     accum_count = defaultdict(lambda: np.zeros(vocab_size, dtype=float))
     
     interesting_tokens = [
-        "[BOS]", "[EOS]", "[SEP]", "[REV]", "[BORROW]", "[MATH]", "[ANS]", " ", "+", "-",
-        "0", "1", "2", "3", "4", "5", "6", "7", "8", "9"
+        "[BOS]", "[EOS]", "[SEP]", "[REV]", "[BORROW]", "[MATH]", "[ANS]", " ", "+", "-","?",
+        "0", "1", "2", "3", "4", "5", "6", "7", "8", "9","=",":","|","[PASS]"
     ]
     interesting_ids = [tokenizer.vocab.get(t) for t in interesting_tokens if t in tokenizer.vocab]
 
