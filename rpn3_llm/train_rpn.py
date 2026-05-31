@@ -299,7 +299,7 @@ def run_generation_validation(model, val_loader, device, step, num_batches=4):
     model.train()
     return gen_accuracy_pct
 
-def train_rpn_llm(start_step=0, checkpoint_path=None, model_type="rope", max_steps=80000, dataset_prefix="1-22_uniform_BOS", use_phase_mask=True, mlp_ratio=4, tau=1.0, use_gated_residual=False, use_mohsa=False, rope_theta=10000.0, use_recency_bias=False, weight_decay=0.1, use_rezero=False, max_lr=3e-4, freeze_embeddings=False, freeze_non_attn=False, use_focal_loss=False, focal_loss_gamma=2.0, n_counter=0, n_buckets=4, n_coord=0, n_coord_heads=4):
+def train_rpn_llm(start_step=0, checkpoint_path=None, model_type="rope", max_steps=80000, dataset_prefix="1-22_uniform_BOS", use_phase_mask=True, mlp_ratio=4, tau=1.0, use_gated_residual=False, use_mohsa=False, rope_theta=10000.0, use_recency_bias=False, weight_decay=0.1, use_rezero=False, max_lr=3e-4, freeze_embeddings=False, freeze_non_attn=False, use_focal_loss=False, focal_loss_gamma=2.0, n_counter=0, n_buckets=4, n_coord=0, n_coord_heads=4, use_digit_abstraction=False, freeze_coord_scale=False):
     device = 'cuda' if torch.cuda.is_available() else 'mps' if torch.backends.mps.is_available() else 'cpu'
     print(f"Using device: {device}")
 
@@ -364,9 +364,9 @@ def train_rpn_llm(start_step=0, checkpoint_path=None, model_type="rope", max_ste
         if model_type == "rdt":
             config = GPTConfig(vocab_size=64, n_prelude=1, n_coda=1, n_layer=6, n_head=8, n_embd=512, block_size=T)
         elif model_type == "ut":
-            config = GPTConfig(vocab_size=64, n_layer=2, n_head=8, n_embd=384, block_size=T, universal=True, tau=tau, use_phase_mask=use_phase_mask, mlp_ratio=mlp_ratio, use_gated_residual=use_gated_residual, use_mohsa=use_mohsa, rope_theta=rope_theta, use_recency_bias=use_recency_bias, bos_token_id=bos_id, phase_token_ids=phase_token_ids, use_rezero=use_rezero, freeze_embeddings=freeze_embeddings, use_focal_loss=use_focal_loss, focal_loss_gamma=focal_loss_gamma, n_counter=n_counter, n_buckets=n_buckets, n_coord=n_coord, n_coord_heads=n_coord_heads)
+            config = GPTConfig(vocab_size=64, n_layer=2, n_head=8, n_embd=384, block_size=T, universal=True, tau=tau, use_phase_mask=use_phase_mask, mlp_ratio=mlp_ratio, use_gated_residual=use_gated_residual, use_mohsa=use_mohsa, rope_theta=rope_theta, use_recency_bias=use_recency_bias, bos_token_id=bos_id, phase_token_ids=phase_token_ids, use_rezero=use_rezero, freeze_embeddings=freeze_embeddings, use_focal_loss=use_focal_loss, focal_loss_gamma=focal_loss_gamma, n_counter=n_counter, n_buckets=n_buckets, n_coord=n_coord, n_coord_heads=n_coord_heads, use_digit_abstraction=use_digit_abstraction, freeze_coord_scale=freeze_coord_scale)
         elif model_type == "rope":
-            config = GPTConfig(vocab_size=64, n_layer=2, n_head=6, n_embd=192, block_size=T, universal=False, use_phase_mask=use_phase_mask, mlp_ratio=mlp_ratio, use_gated_residual=use_gated_residual, use_mohsa=use_mohsa, bos_token_id=bos_id, phase_token_ids=phase_token_ids, use_rezero=use_rezero, freeze_embeddings=freeze_embeddings, use_focal_loss=use_focal_loss, focal_loss_gamma=focal_loss_gamma, n_counter=n_counter, n_buckets=n_buckets, n_coord=n_coord, n_coord_heads=n_coord_heads)
+            config = GPTConfig(vocab_size=64, n_layer=2, n_head=6, n_embd=192, block_size=T, universal=False, use_phase_mask=use_phase_mask, mlp_ratio=mlp_ratio, use_gated_residual=use_gated_residual, use_mohsa=use_mohsa, bos_token_id=bos_id, phase_token_ids=phase_token_ids, use_rezero=use_rezero, freeze_embeddings=freeze_embeddings, use_focal_loss=use_focal_loss, focal_loss_gamma=focal_loss_gamma, n_counter=n_counter, n_buckets=n_buckets, n_coord=n_coord, n_coord_heads=n_coord_heads, use_digit_abstraction=use_digit_abstraction, freeze_coord_scale=freeze_coord_scale)
 
         if n_counter == 3:
             config.counter_inject_layers = [-1, 0, 1]
@@ -416,6 +416,10 @@ def train_rpn_llm(start_step=0, checkpoint_path=None, model_type="rope", max_ste
         model_prefix += f"_cnt{config.n_counter}"
     if getattr(config, 'n_coord', 0) > 0:
         model_prefix += f"_crd{config.n_coord}"
+    if getattr(config, 'use_digit_abstraction', False):
+        model_prefix += "_digitAbs"
+    if getattr(config, 'freeze_coord_scale', False):
+        model_prefix += "_freezeCoordScale"
     if rope_theta != 10000:
         model_prefix += "_theta"
     if use_recency_bias:
@@ -608,8 +612,10 @@ if __name__ == "__main__":
     parser.add_argument("--n_buckets", type=int, default=4, help="Number of buckets for CounterHead")
     parser.add_argument("--n_coord", type=int, default=0, help="Number of CoordinateHead blocks")
     parser.add_argument("--n_coord_heads", type=int, default=4, help="Number of heads for CoordinateHead")
+    parser.add_argument("--use_digit_abstraction", action="store_true", help="Enable digit-identity abstraction in self-attention")
+    parser.add_argument("--freeze_coord_scale", action="store_true", help="Freeze coordinate head scale parameter at 0.5")
     parser.set_defaults(use_phase_mask=True)
     
     args = parser.parse_args()
     
-    train_rpn_llm(args.start_step, args.checkpoint_path, args.model, args.max_steps, args.dataset, args.use_phase_mask, args.mlp_ratio, args.tau, args.use_gated_residual, args.use_mohsa, args.rope_theta, args.use_recency_bias, args.weight_decay, args.use_rezero, args.max_lr, args.freeze_embeddings, args.freeze_non_attn, args.use_focal_loss, args.focal_loss_gamma, args.n_counter, args.n_buckets, args.n_coord, args.n_coord_heads)
+    train_rpn_llm(args.start_step, args.checkpoint_path, args.model, args.max_steps, args.dataset, args.use_phase_mask, args.mlp_ratio, args.tau, args.use_gated_residual, args.use_mohsa, args.rope_theta, args.use_recency_bias, args.weight_decay, args.use_rezero, args.max_lr, args.freeze_embeddings, args.freeze_non_attn, args.use_focal_loss, args.focal_loss_gamma, args.n_counter, args.n_buckets, args.n_coord, args.n_coord_heads, args.use_digit_abstraction, args.freeze_coord_scale)
