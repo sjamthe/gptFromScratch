@@ -208,7 +208,7 @@ def run_teacher_forcing_validation(model, val_loader, device, step):
     val_ans_errors_pct = (val_ans_errors / val_ans_total) * 100.0 if val_ans_total > 0 else 0.0
     val_perplexity = math.exp(val_loss_accum)
     
-    stmt = f"Step {step+1}, Val Loss: {val_loss_accum:.4f}, Acc: {val_eq_accuracy_pct:.2f}% (Total Eq: {int(val_target_accum)})\n"
+    stmt = f"Step {step+1}, Val Loss: {val_loss_accum:.5f}, Acc: {val_eq_accuracy_pct:.2f}% (Total Eq: {int(val_target_accum)})\n"
     stmt += f"  ERRORS -> REV1: {val_rev1_errors_pct:.2f}% ({int(val_rev1_errors)}/{val_rev1_total}), MATH1: {val_math1_errors_pct:.2f}% ({int(val_math1_errors)}/{val_math1_total}), REV2: {val_rev2_errors_pct:.2f}% ({int(val_rev2_errors)}/{val_rev2_total}), MATH2: {val_math2_errors_pct:.2f}% ({int(val_math2_errors)}/{val_math2_total}), ANS: {val_ans_errors_pct:.2f}% ({int(val_ans_errors)}/{val_ans_total})\n"
     stmt += f"  PPL: {val_perplexity:.2f}"
     print(stmt)
@@ -446,14 +446,16 @@ def train_rpn_llm(start_step=0, checkpoint_path=None, model_type="rope", max_ste
     warmup_steps = 1000
     
     def get_lr(it):
-        # if start_step >= 200000:
-        #     if it < start_step:
-        #         return max_lr
-        #     if it > lr_decay_steps:
-        #         return min_lr
-        #     decay_ratio = (it - start_step) / (lr_decay_steps - start_step)
-        #     coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio))
-        #     return min_lr + (max_lr - min_lr) * coeff
+        if start_step >= 200000:
+            lr_decay_steps = 300000
+            min_lr = max_lr * 0.01
+            if it < start_step:
+                return max_lr
+            if it > lr_decay_steps:
+                return min_lr
+            decay_ratio = (it - start_step) / (lr_decay_steps - start_step)
+            coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio))
+            return min_lr + (max_lr - min_lr) * coeff
             
         if it < warmup_steps:
             return max_lr * (it+1) / warmup_steps
@@ -538,7 +540,7 @@ def train_rpn_llm(start_step=0, checkpoint_path=None, model_type="rope", max_ste
         dt = (t1 - t0)*1000 # ms
         tokens_per_sec = grad_accum_steps * train_loader.B * train_loader.T / (t1 - t0)
         if (step+1) % 100 == 0:
-            print(f"Step {step+1}, Loss: {loss_accum.item():.4f}, lr: {lr:.4e}, norm: {norm:.4f}, Time: {dt:.2f}ms, Tokens per second: {tokens_per_sec:.2f}")
+            print(f"Step {step+1}, Loss: {loss_accum.item():.5f}, lr: {lr:.5e}, norm: {norm:.5f}, Time: {dt:.2f}ms, Tokens per second: {tokens_per_sec:.2f}")
 
         if (step+1) % 1000 == 0:
             val_loss_accum, val_perplexity, val_eq_acc, val_rev1_err, val_math1_err, val_rev2_err, val_math2_err, val_ans_err = run_teacher_forcing_validation(model, val_loader, device, step)
