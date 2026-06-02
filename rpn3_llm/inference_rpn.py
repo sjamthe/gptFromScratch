@@ -55,6 +55,7 @@ def run_inference(checkpoint_path, prompt_text, max_gen=500):
             next_id = torch.argmax(logits).item()
             
             if next_id == eos_id:
+                print(f"\nReached terminator '[EOS]'.")
                 break
                 
             generated_tokens.append(next_id)
@@ -62,7 +63,7 @@ def run_inference(checkpoint_path, prompt_text, max_gen=500):
             
             # Print current generation progress
             current_str = tokenizer.decode(generated_tokens)
-            print(f"\rGenerating: {current_str}", end="", flush=True)
+            print(f"\nGenerating: {current_str}", end="", flush=True)
             
             if next_id == unk_id:
                 print(f"\nReached terminator '[UNK]'.")

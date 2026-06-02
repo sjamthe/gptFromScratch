@@ -1,0 +1,868 @@
+from torch.nn.functional import leaky_relu
+from dataclasses import dataclass, field
+import torch
+from torch import nn
+from torch.nn import functional as F
+import inspect
+import math
+
+@dataclass
+class GPTConfig:
+    block_size: int = 2048 # max sequence length
+    vocab_size: int = 50 # number of tokens: 50,000 BPE merges + 256 bytes tokens + 1 <|endoftext|> token
+    n_layer: int = 8 # number of transformer blocks
+    n_head: int = 8 # number of attention heads
+    n_embd: int = 512 # embedding dimension
+    universal: bool = False # if True, all layers share same weights
+    use_phase_mask: bool = True # if True, use sequential phase masking
+    mlp_ratio: int = 4 # expansion factor for MLP hidden layer
+    use_gated_residual: bool = False # if True, use data-dependent gating for residuals
+    use_mohsa: bool = False # if True, use Multi-Overlapped-Head Self-Attention
+    rope_theta: float = 10000.0 # base for RoPE frequencies
+    use_recency_bias: bool = False # if True, use relative position bias for recency
+    bos_token_id: int = 2
+    phase_token_ids: list = None
+    tau: float = 1.0 # sharpness of attention
+    use_rezero: bool = False # if True, use learned scalar for residuals
+    freeze_embeddings: bool = False # if True, freeze the embedding layer
+    use_focal_loss: bool = False # if True, use focal loss to focus on hard tokens
+    focal_loss_gamma: float = 2.0 # gamma parameter for focal loss
+    n_counter: int = 0 # number of CounterHead blocks
+    n_buckets: int = 4 # number of buckets for CounterHead
+    # Injection points for CounterHeads. Use -1 for before all transformer layers.
+    # Use 0..n_layer-1 to inject after that block index.
+    # Must have exactly n_counter entries. Examples:
+    #   n_counter=1, counter_inject_layers=[-1]        -> one head before all layers (original behavior)
+    #   n_counter=2, counter_inject_layers=[-1, 0]     -> one head before layers, one after block 0
+    #   n_counter=3, counter_inject_layers=[-1, 0, 2]  -> before layers, after block 0, after block 2
+    counter_inject_layers: list = field(default=None)
+    n_coord: int = 0 # number of CoordinateHead blocks
+    n_coord_heads: int = 4 # number of heads in CoordinateHead
+    coord_inject_layers: list = field(default=None)
+    freeze_coord_scale: bool = False # Whether to freeze coordinate head scale
+    
+# --- RoPE Implementation ---
+def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0):
+    freqs = 1.0 / (theta ** (torch.arange(0, dim, 2)[: (dim // 2)].float() / dim))
+    t = torch.arange(end, device=freqs.device, dtype=torch.float32)
+    freqs = torch.outer(t, freqs).float()
+    freqs_cis = torch.polar(torch.ones_like(freqs), freqs)  # complex64
+    return freqs_cis
+
+def reshape_for_broadcast(freqs_cis: torch.Tensor, x: torch.Tensor):
+    ndim = x.ndim
+    assert 0 <= 1 < ndim
+    assert freqs_cis.shape == (x.shape[1], x.shape[-1])
+    shape = [d if i == 1 or i == ndim - 1 else 1 for i, d in enumerate(x.shape)]
+    return freqs_cis.view(*shape)
+
+def apply_rotary_emb(
+    xq: torch.Tensor,
+    xk: torch.Tensor,
+    freqs_cis: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    xq_ = torch.view_as_complex(xq.float().reshape(*xq.shape[:-1], -1, 2))
+    xk_ = torch.view_as_complex(xk.float().reshape(*xk.shape[:-1], -1, 2))
+    freqs_cis = reshape_for_broadcast(freqs_cis, xq_)
+    xq_out = torch.view_as_real(xq_ * freqs_cis).flatten(3)
+    xk_out = torch.view_as_real(xk_ * freqs_cis).flatten(3)
+    return xq_out.type_as(xq), xk_out.type_as(xk)
+
+class RecencyBias(nn.Module):
+    def __init__(self, max_len=64):
+        super().__init__()
+        self.bias = nn.Parameter(torch.zeros(max_len))
+    
+    def forward(self, T, total_k_len, offset, device):
+        q_idx = torch.arange(offset, offset + T, device=device).unsqueeze(1)
+        k_idx = torch.arange(total_k_len, device=device).unsqueeze(0)
+        dist = (q_idx - k_idx).clamp(0, len(self.bias) - 1)
+        return self.bias[dist]  # [T, T_total]
+
+class CausalSelfAttention(nn.Module):
+    def __init__(self, config: GPTConfig):
+        super().__init__()
+        assert config.n_embd % config.n_head == 0
+        self.c_attn = nn.Linear(config.n_embd, 3 * config.n_embd)
+        self.c_proj = nn.Linear(config.n_embd, config.n_embd)
+        self.c_proj.NANO_GPT_SCALE_INIT = 1
+        self.n_head = config.n_head
+        self.n_embd = config.n_embd
+        self.use_mohsa = getattr(config, 'use_mohsa', False)
+        if self.use_mohsa:
+            self.c_attn_large = nn.Linear(config.n_embd, 3 * config.n_embd)
+        self.use_recency_bias = getattr(config, 'use_recency_bias', False)
+        if self.use_recency_bias:
+            self.recency_bias = RecencyBias(max_len=64)
+        # No absolute bias mask initialization needed for flash attention
+
+        # Lower tau is used to sharpen attention to a token if it is hazzy
+        self.tau = getattr(config, 'tau', 1.0)
+    
+    def forward(self, x: torch.Tensor, freqs_cis: torch.Tensor, use_cache: bool = False, cache_state: tuple = None, return_attention: bool = False, attn_mask: torch.Tensor = None, head_mask: torch.Tensor = None) -> tuple:
+        B, T, C = x.size()
+        
+        if self.use_mohsa:
+            qkv_small = self.c_attn(x)
+            q_s, k_s, v_s = qkv_small.split(self.n_embd, dim=2)
+            
+            qkv_large = self.c_attn_large(x)
+            q_l, k_l, v_l = qkv_large.split(self.n_embd, dim=2)
+            
+            freqs_cis_large, freqs_cis_small = freqs_cis if freqs_cis is not None else (None, None)
+            
+            n_head_small = self.n_head
+            head_dim_small = C // n_head_small
+            n_head_large = self.n_head // 2
+            head_dim_large = C // n_head_large
+            
+            q_s = q_s.view(B, T, n_head_small, head_dim_small)
+            k_s = k_s.view(B, T, n_head_small, head_dim_small)
+            v_s = v_s.view(B, T, n_head_small, head_dim_small)
+            
+            q_l = q_l.view(B, T, n_head_large, head_dim_large)
+            k_l = k_l.view(B, T, n_head_large, head_dim_large)
+            v_l = v_l.view(B, T, n_head_large, head_dim_large)
+            
+            offset_l, offset_s = 0, 0
+            if use_cache and cache_state is not None:
+                offset_l = cache_state[0].size(2)
+                offset_s = cache_state[2].size(2)
+                
+            if freqs_cis_large is not None:
+                q_l, k_l = apply_rotary_emb(q_l, k_l, freqs_cis_large[offset_l : offset_l + T])
+            if freqs_cis_small is not None:
+                q_s, k_s = apply_rotary_emb(q_s, k_s, freqs_cis_small[offset_s : offset_s + T])
+                
+            q_l = q_l.transpose(1, 2)
+            k_l = k_l.transpose(1, 2)
+            v_l = v_l.transpose(1, 2)
+            
+            q_s = q_s.transpose(1, 2)
+            k_s = k_s.transpose(1, 2)
+            v_s = v_s.transpose(1, 2)
+            
+            if self.tau < 1.0 and self.tau > 0.0:
+                q_l = q_l / self.tau
+                q_s = q_s / self.tau
+            
+            if use_cache:
+                if cache_state is not None:
+                    k_cache_l, v_cache_l, k_cache_s, v_cache_s = cache_state
+                    k_l = torch.cat([k_cache_l, k_l], dim=2)
+                    v_l = torch.cat([v_cache_l, v_l], dim=2)
+                    k_s = torch.cat([k_cache_s, k_s], dim=2)
+                    v_s = torch.cat([v_cache_s, v_s], dim=2)
+                cache_state = (k_l, v_l, k_s, v_s)
+                
+            is_causal = (T > 1)
+            
+            def get_attn(qq, kk, vv, off):
+                if self.use_recency_bias:
+                    rb = self.recency_bias(T, kk.size(2), off, x.device)
+                else:
+                    rb = None
+
+                if return_attention:
+                    att = (qq @ kk.transpose(-2, -1)) * (1.0 / math.sqrt(kk.size(-1)))
+                    if rb is not None:
+                        att = att + rb
+                    if is_causal:
+                        q_idx = torch.arange(off, off + T, device=x.device).view(-1, 1)
+                        k_idx = torch.arange(kk.size(2), device=x.device).view(1, -1)
+                        mask = q_idx < k_idx
+                        if attn_mask is not None:
+                            mask = mask | ~attn_mask.squeeze(1)
+                        att = att.masked_fill(mask, float('-inf'))
+                    aw = F.softmax(att, dim=-1)
+                    return aw @ vv, aw
+                else:
+                    if self.use_recency_bias:
+                        # Create float mask
+                        float_mask = torch.zeros(T, kk.size(2), device=x.device)
+                        if is_causal:
+                            q_idx = torch.arange(off, off + T, device=x.device).view(-1, 1)
+                            k_idx = torch.arange(kk.size(2), device=x.device).view(1, -1)
+                            causal_mask = q_idx < k_idx
+                            float_mask = float_mask.masked_fill(causal_mask, float('-inf'))
+                        float_mask = float_mask + rb
+                        
+                        if attn_mask is not None:
+                            if attn_mask.dtype == torch.bool:
+                                float_mask = float_mask.masked_fill(~attn_mask, float('-inf'))
+                            else:
+                                float_mask = float_mask + attn_mask
+                        return F.scaled_dot_product_attention(qq, kk, vv, attn_mask=float_mask, is_causal=False), None
+                    else:
+                        if attn_mask is not None:
+                            return F.scaled_dot_product_attention(qq, kk, vv, attn_mask=attn_mask, is_causal=False), None
+                        else:
+                            return F.scaled_dot_product_attention(qq, kk, vv, is_causal=is_causal), None
+            
+            y_l, aw_l = get_attn(q_l, k_l, v_l, offset_l)
+            y_s, aw_s = get_attn(q_s, k_s, v_s, offset_s)
+            
+            attn_weights = (aw_l, aw_s) if return_attention else None
+            
+            y_l = y_l.transpose(1, 2).contiguous().view(B, T, C)
+            y_s = y_s.transpose(1, 2).contiguous().view(B, T, C)
+            
+            y = y_l + y_s
+            
+            if head_mask is not None:
+                pass # head masking for MOHSA is complex, skipping for now unless needed
+
+            y = self.c_proj(y)
+            return y, cache_state, attn_weights
+
+        # Standard Attention below
+        qkv = self.c_attn(x)
+        q,k,v = qkv.split(self.n_embd, dim=2)
+        
+        # Explicit shape for RoPE application: (B, T, n_head, head_dim)
+        q = q.view(B, T, self.n_head, C // self.n_head)
+        k = k.view(B, T, self.n_head, C // self.n_head)
+        v = v.view(B, T, self.n_head, C // self.n_head)
+
+        offset = 0
+        if use_cache and cache_state is not None:
+            # cache_state[0] is k_cache of shape (B, n_head, T_cache, head_dim)
+            offset = cache_state[0].size(2)
+
+        # Apply RoPE
+        if freqs_cis is not None:
+            # slice freqs_cis exactly aligning to the absolute sequence indices!
+            q, k = apply_rotary_emb(q, k, freqs_cis[offset : offset + T])
+            
+        # Transpose for attention computation: (B, n_head, T_new, head_dim)
+        q = q.transpose(1, 2)
+        k = k.transpose(1, 2)
+        v = v.transpose(1, 2)
+
+        if self.tau < 1.0 and self.tau > 0.0:
+            q = q/self.tau
+
+        if use_cache:
+            if cache_state is not None:
+                k_cache, v_cache = cache_state
+                k = torch.cat([k_cache, k], dim=2)
+                v = torch.cat([v_cache, v], dim=2)
+            cache_state = (k, v)
+
+        # Flash attention handles custom causality correctly when queries run dynamically token-by-token
+        is_causal = (T > 1) 
+        if self.use_recency_bias:
+            rb = self.recency_bias(T, k.size(2), offset, x.device)
+        else:
+            rb = None
+
+        attn_weights = None
+        
+        if return_attention:
+            # Manual attention to capture weights (Flash Attention hides them)
+            # (B, nh, T, hs) @ (B, nh, hs, T_total) -> (B, nh, T, T_total)
+            att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
+            if rb is not None:
+                att = att + rb
+            if is_causal:
+                # Apply causal mask manually
+                # Create mask based on actual sequence indices
+                # k.size(2) is the total key length (T_old + T_new)
+                # T is the new query length
+                # We need to mask out tokens where key_index > query_index
+                q_idx = torch.arange(offset, offset + T, device=x.device).view(-1, 1)
+                k_idx = torch.arange(k.size(2), device=x.device).view(1, -1)
+                mask = q_idx < k_idx
+                if attn_mask is not None:
+                    # attn_mask is (B, 1, T, T_total)
+                    mask = mask | ~attn_mask.squeeze(1) 
+                att = att.masked_fill(mask, float('-inf'))
+            
+            attn_weights = F.softmax(att, dim=-1)
+            y = attn_weights @ v
+        else:
+            if self.use_recency_bias:
+                # Create float mask
+                float_mask = torch.zeros(T, k.size(2), device=x.device)
+                if is_causal:
+                    q_idx = torch.arange(offset, offset + T, device=x.device).view(-1, 1)
+                    k_idx = torch.arange(k.size(2), device=x.device).view(1, -1)
+                    causal_mask = q_idx < k_idx
+                    float_mask = float_mask.masked_fill(causal_mask, float('-inf'))
+                float_mask = float_mask + rb
+                
+                if attn_mask is not None:
+                    if attn_mask.dtype == torch.bool:
+                        float_mask = float_mask.masked_fill(~attn_mask, float('-inf'))
+                    else:
+                        float_mask = float_mask + attn_mask
+                y = F.scaled_dot_product_attention(q, k, v, attn_mask=float_mask, is_causal=False)
+            else:
+                # If we have a custom mask, we must handle causality within it
+                if attn_mask is not None:
+                    y = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask, is_causal=False)
+                else:
+                    y = F.scaled_dot_product_attention(q, k, v, is_causal=is_causal)
+
+        if head_mask is not None:
+            # head_mask is (n_head,) or (n_layer, n_head)
+            # If (n_layer, n_head), we'll handle the slicing at the GPT level or pass the right slice.
+            # Assuming here head_mask is already the (n_head,) slice for this layer call.
+            y = y * head_mask.view(1, -1, 1, 1)
+
+        y = y.transpose(1, 2).contiguous().view(B, T, C)
+        y = self.c_proj(y)
+        return y, cache_state, attn_weights
+
+class MLP(nn.Module):
+    def __init__(self, config: GPTConfig):
+        super().__init__()
+        self.c_fc = nn.Linear(config.n_embd, config.mlp_ratio * config.n_embd)
+        self.gelu = nn.GELU(approximate='tanh')
+        self.c_proj = nn.Linear(config.mlp_ratio * config.n_embd, config.n_embd)
+    
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.c_fc(x)
+        x = self.gelu(x)
+        x = self.c_proj(x)
+        return x
+
+class Block(nn.Module):
+    def __init__(self, config: GPTConfig):
+        super().__init__()
+        self.ln_1 = nn.LayerNorm(config.n_embd)
+        self.attn = CausalSelfAttention(config)
+        self.ln_2 = nn.LayerNorm(config.n_embd)
+        self.mlp = MLP(config)
+        self.use_gated_residual = getattr(config, 'use_gated_residual', False)
+        if self.use_gated_residual:
+            self.attn_gate_proj = nn.Linear(config.n_embd, config.n_embd)
+            self.mlp_gate_proj = nn.Linear(config.n_embd, config.n_embd)
+        
+        self.use_rezero = getattr(config, 'use_rezero', False)
+        if self.use_rezero:
+            self.attn_alpha = nn.Parameter(torch.zeros(1))
+            self.mlp_alpha = nn.Parameter(torch.zeros(1))
+    
+    def forward(self, x: torch.Tensor, freqs_cis: torch.Tensor, use_cache: bool = False, cache_state: tuple = None, return_attention: bool = False, attn_mask: torch.Tensor = None, head_mask: torch.Tensor = None) -> tuple:
+        norm_x_attn = self.ln_1(x)
+        attn_out, cache_out, weights = self.attn(norm_x_attn, freqs_cis, use_cache=use_cache, cache_state=cache_state, return_attention=return_attention, attn_mask=attn_mask, head_mask=head_mask)
+        
+        if self.use_gated_residual:
+            attn_gate = torch.sigmoid(self.attn_gate_proj(norm_x_attn))
+            x = x + attn_gate * attn_out
+        elif self.use_rezero:
+            x = x + self.attn_alpha * attn_out
+        else:
+            x = x + attn_out
+            
+        norm_x_mlp = self.ln_2(x)
+        mlp_out = self.mlp(norm_x_mlp)
+        
+        if self.use_gated_residual:
+            mlp_gate = torch.sigmoid(self.mlp_gate_proj(norm_x_mlp))
+            x = x + mlp_gate * mlp_out
+        elif self.use_rezero:
+            x = x + self.mlp_alpha * mlp_out
+        else:
+            x = x + mlp_out
+            
+        return x, cache_out, weights
+
+class CounterHead(nn.Module):
+    def __init__(self, config: GPTConfig):
+        super().__init__()
+        self.query = nn.Linear(config.n_embd, config.n_buckets)
+        self.out_proj = nn.Linear(config.n_buckets, config.n_embd)
+        self.scale = nn.Parameter(torch.tensor(0.05)) # Learnable scale initialized to 0.05
+    
+    def forward(self, x, use_cache=False, cache_state=None):
+        # x: [B, T, D]
+        logits = self.query(x)           # [B, T, n_buckets]
+        
+        if self.training:
+            # Gumbel-Softmax with straight-through estimator (hard=True) and tau=1.0
+            affinities = F.gumbel_softmax(logits, tau=1.0, hard=True, dim=-1)
+        else:
+            # During evaluation/inference, use deterministic argmax (one-hot) to match the discrete training path
+            indices = logits.argmax(dim=-1)
+            affinities = F.one_hot(indices, num_classes=logits.size(-1)).to(logits.dtype)
+        
+        if use_cache:
+            if cache_state is None:
+                counts = affinities.cumsum(dim=1)
+            else:
+                prev_sum = cache_state[:, -1:, :]
+                counts = prev_sum + affinities
+            new_cache = counts if cache_state is None else torch.cat([cache_state, counts], dim=1)
+            # Normalize counts to keep activations stable and prevent scale collapse
+            counts_norm = F.layer_norm(counts.float(), (counts.shape[-1],)).type_as(counts)
+            out = self.scale * self.out_proj(counts_norm)
+            return out, new_cache
+        else:
+            counts = affinities.cumsum(dim=1) # adds up the assignment vectors from the beginning of the time sequence (index 0) up to the current position 
+            # Normalize counts to keep activations stable and prevent scale collapse
+            counts_norm = F.layer_norm(counts.float(), (counts.shape[-1],)).type_as(counts)
+            out = self.scale * self.out_proj(counts_norm)
+            return out, None
+
+class CoordinateHead(nn.Module):
+    def __init__(self, config: GPTConfig):
+        super().__init__()
+        self.n_heads = getattr(config, 'n_coord_heads', 4)
+        self.n_embd = config.n_embd
+        self.head_dim = self.n_embd // config.n_head
+        
+        self.q_proj = nn.Linear(self.n_embd, self.n_heads * self.head_dim)
+        self.k_proj = nn.Linear(self.n_embd, self.n_heads * self.head_dim)
+        self.out_proj = nn.Linear(self.n_heads, self.n_embd)
+        self.scale = nn.Parameter(torch.tensor(0.5), requires_grad=not getattr(config, 'freeze_coord_scale', False)) # Learnable scale initialized to 0.5 (reduced gradient bottleneck)
+        self.block_size = config.block_size
+
+    def forward(self, x, use_cache=False, cache_state=None, attn_mask=None):
+        # x: [B, T, D]
+        B, T, C = x.size()
+        
+        q = self.q_proj(x)           # [B, T, n_heads * head_dim]
+        k = self.k_proj(x)           # [B, T, n_heads * head_dim]
+        
+        # Reshape for multi-head attention: [B, n_heads, T, head_dim]
+        q = q.view(B, T, self.n_heads, self.head_dim).transpose(1, 2)
+        k = k.view(B, T, self.n_heads, self.head_dim).transpose(1, 2)
+        
+        offset = 0
+        if use_cache:
+            if cache_state is not None:
+                k_cache = cache_state
+                k = torch.cat([k_cache, k], dim=2)
+                offset = k_cache.size(2)
+            new_cache = k
+        else:
+            new_cache = None
+            
+        T_total = k.size(2)
+        
+        # Compute query-key scores
+        scores = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(self.head_dim))
+        
+        # Causal mask based on absolute indices
+        q_idx = torch.arange(offset, offset + T, device=x.device).view(-1, 1)
+        k_idx = torch.arange(T_total, device=x.device).view(1, -1)
+        causal_mask = q_idx < k_idx  # [T, T_total]
+        
+        if attn_mask is not None:
+            if attn_mask.dtype == torch.bool:
+                mask = causal_mask | ~attn_mask.squeeze(1)
+            else:
+                mask = causal_mask
+        else:
+            mask = causal_mask
+            
+        scores = scores.masked_fill(mask.unsqueeze(1), float('-inf'))
+        
+        if attn_mask is not None and attn_mask.dtype != torch.bool:
+            # Handle float (e.g. logit-space additive) masking
+            scores = scores + attn_mask
+            
+        # Attention weights
+        attn_probs = F.softmax(scores, dim=-1)  # [B, n_heads, T, T_total]
+        
+        # Compute relative position distance (i - j)
+        dist = q_idx - k_idx  # [T, T_total]
+        
+        # Translate to [-1, 1] relative to block_size
+        dist_norm = 2.0 * dist.float() / self.block_size - 1.0
+        
+        # Compute expected distance per head: [B, n_heads, T]
+        expected_dist = (attn_probs * dist_norm.unsqueeze(0).unsqueeze(1)).sum(dim=-1)
+        
+        # Reshape to [B, T, n_heads]
+        expected_dist = expected_dist.transpose(1, 2)
+        
+        # Project and scale back to embedding dimension
+        out = self.scale * self.out_proj(expected_dist)
+        
+        return out, new_cache
+
+class GPT(nn.Module):
+    
+    def __init__(self, config: GPTConfig):
+        super().__init__()
+        self.config = config
+        
+        self.n_counter = getattr(config, 'n_counter', 0)
+        if self.n_counter > 0:
+            self.counter_heads = nn.ModuleList([
+                CounterHead(config) 
+                for _ in range(self.n_counter)
+            ])
+            # Resolve injection layers: default all heads to -1 (before transformer)
+            raw_inject = getattr(config, 'counter_inject_layers', None)
+            if raw_inject is None:
+                self.counter_inject_layers = [-1] * self.n_counter
+            else:
+                assert len(raw_inject) == self.n_counter, (
+                    f"counter_inject_layers must have exactly n_counter={self.n_counter} entries, "
+                    f"got {len(raw_inject)}"
+                )
+                self.counter_inject_layers = list(raw_inject)
+            # check config is correct
+            for layer_idx in self.counter_inject_layers:
+                assert layer_idx == -1 or 0 <= layer_idx < config.n_layer, (
+                    f"counter_inject_layers entry {layer_idx} out of range "
+                    f"[-1, {config.n_layer - 1}]"
+                )
+            # Build lookup: layer_index -> list of head indices to inject at that point
+            # layer_index = -1 means before all transformer blocks
+            self._counter_inject_map = {}
+            for head_idx, layer_idx in enumerate(self.counter_inject_layers):
+                self._counter_inject_map.setdefault(layer_idx, []).append(head_idx)
+        else:
+            self.counter_inject_layers = []
+            self._counter_inject_map = {}
+            
+        self.n_coord = getattr(config, 'n_coord', 0)
+        if self.n_coord > 0:
+            self.coordinate_heads = nn.ModuleList([
+                CoordinateHead(config) 
+                for _ in range(self.n_coord)
+            ])
+            raw_inject = getattr(config, 'coord_inject_layers', None)
+            if raw_inject is None:
+                self.coord_inject_layers = [-1] * self.n_coord
+            else:
+                assert len(raw_inject) == self.n_coord, (
+                    f"coord_inject_layers must have exactly n_coord={self.n_coord} entries, "
+                    f"got {len(raw_inject)}"
+                )
+                self.coord_inject_layers = list(raw_inject)
+            for layer_idx in self.coord_inject_layers:
+                assert layer_idx == -1 or 0 <= layer_idx < config.n_layer, (
+                    f"coord_inject_layers entry {layer_idx} out of range "
+                    f"[-1, {config.n_layer - 1}]"
+                )
+            self._coord_inject_map = {}
+            for head_idx, layer_idx in enumerate(self.coord_inject_layers):
+                self._coord_inject_map.setdefault(layer_idx, []).append(head_idx)
+        else:
+            self.coord_inject_layers = []
+            self._coord_inject_map = {}
+        
+        self.transformer = nn.ModuleDict({
+            'wte': nn.Embedding(config.vocab_size, config.n_embd),
+            'ln_f': nn.LayerNorm(config.n_embd),
+        })
+        
+        if config.universal:
+            self.transformer.h = Block(config)
+            # Learned "Pass" (Coordinate) embeddings (one for each iteration)
+            self.pass_emb = nn.Parameter(torch.randn(config.n_layer, config.n_embd) * 0.02)
+        else:
+            self.transformer.h = nn.ModuleList([Block(config) for _ in range(config.n_layer)])
+            self.pass_emb = None
+
+        self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
+        self.transformer.wte.weight = self.lm_head.weight
+        
+        # Initialize RoPE frequencies
+        rope_theta = getattr(config, 'rope_theta', 10000.0)
+        if getattr(config, 'use_mohsa', False):
+            # For MOHSA with 192 embd, 6 small heads (dim=32), 3 large heads (dim=64)
+            freqs_cis_large = precompute_freqs_cis(config.n_embd // (config.n_head // 2), config.block_size, theta=rope_theta)
+            freqs_cis_small = precompute_freqs_cis(config.n_embd // config.n_head, config.block_size, theta=rope_theta)
+            self.register_buffer("freqs_cis_large", freqs_cis_large, persistent=False)
+            self.register_buffer("freqs_cis_small", freqs_cis_small, persistent=False)
+            self.freqs_cis = None
+        else:
+            head_dim = config.n_embd // config.n_head
+            freqs_cis = precompute_freqs_cis(head_dim, config.block_size, theta=rope_theta)
+            self.register_buffer("freqs_cis", freqs_cis, persistent=False)
+
+        self.apply(self._init_weights)
+
+        # Custom initialization for CounterHead query weights (higher std = 0.2) to help saturate Gumbel-Softmax early
+        if self.n_counter > 0:
+            for head in self.counter_heads:
+                nn.init.normal_(head.query.weight, mean=0.0, std=0.2)
+                if head.query.bias is not None:
+                    nn.init.zeros_(head.query.bias)
+
+        # Custom initialization for CoordinateHead query/key weights (higher std = 0.1) for healthy initial attention spread
+        if self.n_coord > 0:
+            for head in self.coordinate_heads:
+                nn.init.normal_(head.q_proj.weight, mean=0.0, std=0.1)
+                nn.init.normal_(head.k_proj.weight, mean=0.0, std=0.1)
+                if head.q_proj.bias is not None:
+                    nn.init.zeros_(head.q_proj.bias)
+                if head.k_proj.bias is not None:
+                    nn.init.zeros_(head.k_proj.bias)
+
+        if getattr(config, 'freeze_embeddings', False):
+            self.transformer.wte.weight.requires_grad = False
+            self.lm_head.weight.requires_grad = False
+        
+    def _init_weights(self, module: nn.Module):
+        if isinstance(module, nn.Linear):
+            std = 0.02
+            if hasattr(module, 'NANO_GPT_SCALE_INIT'):
+                std *= (2 * self.config.n_layer) ** -0.5
+            torch.nn.init.normal_(module.weight, mean=0.0, std=std)
+            if module.bias is not None:
+                torch.nn.init.zeros_(module.bias)
+        elif isinstance(module, nn.Embedding):
+            torch.nn.init.normal_(module.weight, mean=0.0, std=.02)
+        
+    def forward(self, idx: torch.Tensor, targets: torch.Tensor = None, use_cache: bool = False, past_key_values: list = None, return_attention: bool = False, num_passes: int = None, halt_threshold: float = None, halt_on_logit_stability: int = None, full_phase_ids: torch.Tensor = None, head_mask: torch.Tensor = None) -> tuple:
+        B, T = idx.size()
+        
+        # Document & Phase Masking
+        attn_mask = None
+        if T > 1: 
+            # Training / First step of generation
+            is_bos = (idx == self.config.bos_token_id)  
+            seq_ids = is_bos.cumsum(dim=-1)
+            doc_mask = (seq_ids.unsqueeze(1) == seq_ids.unsqueeze(2))
+            causal_mask = torch.tril(torch.ones(T, T, device=idx.device, dtype=torch.bool))
+            
+            if self.config.use_phase_mask:
+                if self.config.phase_token_ids is not None:
+                    phase_tensor = torch.tensor(self.config.phase_token_ids, device=idx.device)
+                    is_phase_shift = torch.isin(idx, phase_tensor)
+                else:
+                    # Fallback to hardcoded defaults if not provided
+                    is_phase_shift = (idx == 10) | (idx == 11) | (idx == 12)
+                    
+                global_phase_ids = is_phase_shift.cumsum(dim=-1)
+                phase_diff = (global_phase_ids.unsqueeze(-1) - global_phase_ids.unsqueeze(-2))
+                phase_mask = (phase_diff == 0) | (phase_diff == 1)
+                full_mask = doc_mask & phase_mask & causal_mask
+            else:
+                full_mask = doc_mask & causal_mask
+
+            attn_mask = full_mask.unsqueeze(1) # (B, 1, T, T)
+
+        elif past_key_values is not None:
+            # Inference step (T=1) with KV Cache
+            if self.config.use_phase_mask and full_phase_ids is not None:
+                current_phase_ids = full_phase_ids[:, -1:] # (B, 1)
+                phase_diff = (current_phase_ids.unsqueeze(-1) - full_phase_ids.unsqueeze(-2))
+                phase_mask = (phase_diff == 0) | (phase_diff == 1) # (B, 1, T_total)
+                attn_mask = phase_mask.unsqueeze(1) # (B, 1, 1, T_total)
+            else:
+                # Standard causal inference (no additional mask needed beyond is_causal=True)
+                attn_mask = None
+
+        x = self.transformer.wte(idx)
+        
+        freqs_cis = self.freqs_cis
+        # present_key_values must be pre-allocated in slot order:
+        #   slots 0..n_counter-1         -> CounterHead caches (one per head, in head index order)
+        #   slots n_counter..n_counter+n_layer-1 -> transformer block KV caches
+        # We pre-fill with None so mid-loop heads can write to their slot by index.
+        present_key_values = [None] * (self.n_counter + self.n_coord + self.config.n_layer) if use_cache else None
+
+        def _apply_counter_heads_at(layer_idx, x):
+            """Inject all CounterHeads registered at layer_idx into x (residual add).
+            Updates present_key_values in-place if use_cache is True.
+            layer_idx == -1 means before all transformer blocks."""
+            heads_at = self._counter_inject_map.get(layer_idx, [])
+            for head_idx in heads_at:
+                head = self.counter_heads[head_idx]
+                cache_slot = head_idx  # CounterHead cache slots are 0..n_counter-1
+                cache_in = (
+                    past_key_values[cache_slot]
+                    if (past_key_values is not None and cache_slot < len(past_key_values))
+                    else None
+                )
+                cnt_out, cache_out = head(x, use_cache=use_cache, cache_state=cache_in)
+                x = x + cnt_out
+                if use_cache:
+                    present_key_values[cache_slot] = cache_out
+            return x
+
+        def _apply_coordinate_heads_at(layer_idx, x, attn_mask=None):
+            """Inject all CoordinateHeads registered at layer_idx into x (residual add).
+            Updates present_key_values in-place if use_cache is True.
+            layer_idx == -1 means before all transformer blocks."""
+            heads_at = self._coord_inject_map.get(layer_idx, [])
+            for head_idx in heads_at:
+                head = self.coordinate_heads[head_idx]
+                cache_slot = self.n_counter + head_idx
+                cache_in = (
+                    past_key_values[cache_slot]
+                    if (past_key_values is not None and cache_slot < len(past_key_values))
+                    else None
+                )
+                crd_out, cache_out = head(x, use_cache=use_cache, cache_state=cache_in, attn_mask=attn_mask)
+                x = x + crd_out
+                if use_cache:
+                    present_key_values[cache_slot] = cache_out
+            return x
+
+        # --- Inject CounterHeads registered at layer -1 (before transformer) ---
+        x = _apply_counter_heads_at(-1, x)
+        # --- Inject CoordinateHeads registered at layer -1 ---
+        x = _apply_coordinate_heads_at(-1, x, attn_mask)
+
+        all_weights = [] if return_attention else None
+        
+        # Universal vs Sequential loop
+        block_freqs = (self.freqs_cis_large, self.freqs_cis_small) if getattr(self.config, 'use_mohsa', False) else self.freqs_cis
+        if self.config.universal:
+            # Dynamic Depth: Allow overriding number of passes at inference
+            max_passes = num_passes if num_passes is not None else self.config.n_layer
+            prev_x = None
+            
+            # For logit stability tracking
+            stable_token = None
+            stable_count = 0
+            
+            for i in range(max_passes):
+                # Cycle pass_emb if we exceed trained depth
+                emb_idx = i % self.config.n_layer
+                x = x + self.pass_emb[emb_idx].view(1, 1, -1)
+                
+                # Each pass in the universal loop gets its own KV cache entry
+                cache_idx = self.n_counter + self.n_coord + i
+                cache_in = past_key_values[cache_idx] if (past_key_values is not None and cache_idx < len(past_key_values)) else None
+                h_mask = None
+                if head_mask is not None:
+                    h_mask = head_mask[i]
+                    
+                x, cache_out, weights = self.transformer.h(x, block_freqs, use_cache=use_cache, cache_state=cache_in, return_attention=return_attention, attn_mask=attn_mask, head_mask=h_mask)
+                
+                if use_cache:
+                    present_key_values[cache_idx] = cache_out
+                if return_attention:
+                    all_weights.append(weights)
+
+                # --- Inject CounterHeads registered after this pass index ---
+                x = _apply_counter_heads_at(i, x)
+                # --- Inject CoordinateHeads registered after this pass index ---
+                x = _apply_coordinate_heads_at(i, x, attn_mask)
+                
+                # --- Logit Stability Halting ---
+                if halt_on_logit_stability is not None:
+                    # Project current state to logits for the LAST token only
+                    # This tells us the model's current "best guess"
+                    with torch.no_grad():
+                        last_x = self.transformer.ln_f(x[:, -1, :])
+                        current_logits = self.lm_head(last_x)
+                        current_token = torch.argmax(current_logits, dim=-1)
+                    
+                    if stable_token is not None and (current_token == stable_token).all():
+                        stable_count += 1
+                    else:
+                        stable_token = current_token
+                        stable_count = 1
+                    
+                    if stable_count >= halt_on_logit_stability:
+                        # Logit is stable! Pad and break.
+                        if use_cache:
+                            for j in range(i + 1, max_passes):
+                                present_key_values[self.n_counter + self.n_coord + j] = cache_out
+                        if return_attention:
+                            for _ in range(i + 1, max_passes):
+                                all_weights.append(weights)
+                        break
+
+                # --- Early Stopping (Distance-based) ---
+                if halt_threshold is not None and prev_x is not None:
+                    diff = torch.norm(x - prev_x, p=2, dim=-1).mean()
+                    if diff < halt_threshold:
+                        if use_cache:
+                            for j in range(i + 1, max_passes):
+                                present_key_values[self.n_counter + self.n_coord + j] = cache_out
+                        if return_attention:
+                            for _ in range(i + 1, max_passes):
+                                all_weights.append(weights)
+                        break
+                
+                prev_x = x
+        else:
+            # Standard model: num_passes/halt_threshold is ignored
+            for i, block in enumerate(self.transformer.h):
+                cache_idx = self.n_counter + self.n_coord + i
+                cache_in = past_key_values[cache_idx] if (past_key_values is not None and cache_idx < len(past_key_values)) else None
+                x, cache_out, weights = block(x, block_freqs, use_cache=use_cache, cache_state=cache_in, return_attention=return_attention, attn_mask=attn_mask)
+                if use_cache:
+                    present_key_values[cache_idx] = cache_out
+                if return_attention:
+                    all_weights.append(weights)
+
+                # --- Inject CounterHeads registered after block i ---
+                x = _apply_counter_heads_at(i, x)
+                # --- Inject CoordinateHeads registered after block i ---
+                x = _apply_coordinate_heads_at(i, x, attn_mask)
+            
+        x = self.transformer.ln_f(x)
+        
+        loss = None
+        if targets is not None:
+            logits = self.lm_head(x)
+            use_focal = getattr(self.config, 'use_focal_loss', False)
+            if use_focal:
+                gamma = getattr(self.config, 'focal_loss_gamma', 2.0)
+                flat_logits = logits.view(-1, logits.size(-1))
+                flat_targets = targets.view(-1)
+                
+                # Clone targets and replace ignore_index (-100) with a safe index (0) for gather
+                targets_safe = flat_targets.clone()
+                mask = (targets_safe == -100)
+                targets_safe[mask] = 0
+                
+                probs = F.softmax(flat_logits, dim=-1)
+                pt = probs.gather(-1, targets_safe.unsqueeze(-1)).squeeze(-1)
+                
+                ce = F.cross_entropy(flat_logits, flat_targets, ignore_index=-100, reduction='none')
+                
+                focal_weight = (1.0 - pt) ** gamma
+                focal_weight[mask] = 0.0  # Zero out ignored tokens
+                
+                # Mean over only active tokens
+                num_active = (~mask).sum()
+                loss = (focal_weight * ce).sum() / (num_active + 1e-8)
+            else:
+                loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1))
+        else:
+            logits = self.lm_head(x[:, [-1], :])
+            
+        if return_attention:
+            return logits, loss, all_weights
+            
+        if use_cache:
+            return logits, loss, present_key_values
+            
+        return logits, loss
+    
+    def configure_optimizers(self, weight_decay, learning_rate, device):
+        param_dict = dict(self.named_parameters())
+        param_dict = {k: v for k, v in param_dict.items() if v.requires_grad}
+        # Decay parameters with dim >= 2, except coordinate and counter head weights to avoid weight decay shriveling
+        decay_params = []
+        no_decay_params = []
+        for k, p in param_dict.items():
+            if p.dim() >= 2 and not (
+                ("coordinate_heads" in k and ("q_proj" in k or "k_proj" in k)) or
+                ("counter_heads" in k and ("query" in k or "out_proj" in k))
+            ):
+                decay_params.append(p)
+            else:
+                no_decay_params.append(p)
+        optim_groups = [
+            {'params': decay_params, 'weight_decay': weight_decay},
+            {'params': no_decay_params, 'weight_decay': 0.0}
+        ]
+        num_decay = sum(p.numel() for p in decay_params)
+        num_no_decay = sum(p.numel() for p in no_decay_params)
+        print(f"num decayed parameter tensors: {len(decay_params)} with {num_decay} parameters")
+        print(f"num non-decayed parameter tensors: {len(no_decay_params)} with {num_no_decay} parameters")  
+        fused_available = 'fused' in inspect.signature(torch.optim.AdamW.__init__).parameters
+        use_fused = fused_available and (device == 'cuda' or device == 'mps')
+        print(f"using fused AdamW: {use_fused}")
+        optimizer = torch.optim.AdamW(optim_groups, lr=learning_rate, betas=(0.9, 0.95), eps=1e-8, weight_decay=weight_decay, fused=use_fused)
+        return optimizer
+        
+    @classmethod
+    def from_pretrained(cls, model_type):
+        raise NotImplementedError("from_pretrained is disabled: Custom RoPE implementation incompatible with HF GPT-2 absolute embeddings.")
