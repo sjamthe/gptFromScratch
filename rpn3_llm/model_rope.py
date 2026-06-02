@@ -39,6 +39,7 @@ class GPTConfig:
     n_coord: int = 0 # number of CoordinateHead blocks
     n_coord_heads: int = 4 # number of heads in CoordinateHead
     coord_inject_layers: list = field(default=None)
+    freeze_coord_scale: bool = False # Whether to freeze coordinate head scale
     
 # --- RoPE Implementation ---
 def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0):
@@ -415,7 +416,7 @@ class CoordinateHead(nn.Module):
         self.q_proj = nn.Linear(self.n_embd, self.n_heads * self.head_dim)
         self.k_proj = nn.Linear(self.n_embd, self.n_heads * self.head_dim)
         self.out_proj = nn.Linear(self.n_heads, self.n_embd)
-        self.scale = nn.Parameter(torch.tensor(0.5)) # Learnable scale initialized to 0.5 (reduced gradient bottleneck)
+        self.scale = nn.Parameter(torch.tensor(0.5), requires_grad=not getattr(config, 'freeze_coord_scale', False)) # Learnable scale initialized to 0.5 (reduced gradient bottleneck)
         self.block_size = config.block_size
 
     def forward(self, x, use_cache=False, cache_state=None, attn_mask=None):
