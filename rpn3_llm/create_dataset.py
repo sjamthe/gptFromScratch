@@ -163,7 +163,7 @@ def generate_example(max_numbers=3, max_digits=22):
         # Build tail
         tail = ""
         if i + 1 < num_count:
-            tail += f"[SEP]{rev_numbers[i+1]}{ops[i]}="
+            tail += f"[SEP]{rev_numbers[i+1]}{ops[i]}" # Removed = after ops[i]
         for j in range(i+2, num_count):
             tail += f"[SEP]{rev_numbers[j]}{ops[j-1]}"
         
