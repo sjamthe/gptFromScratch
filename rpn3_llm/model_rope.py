@@ -39,9 +39,6 @@ class GPTConfig:
     n_coord: int = 0 # number of CoordinateHead blocks
     n_coord_heads: int = 4 # number of heads in CoordinateHead
     coord_inject_layers: list = field(default=None)
-    use_digit_abstraction: bool = False # if True, use digit-identity abstraction
-    freeze_coord_scale: bool = False # if True, freeze coordinate head scale parameter
-    
     
 # --- RoPE Implementation ---
 def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0):
@@ -101,7 +98,7 @@ class CausalSelfAttention(nn.Module):
         # Lower tau is used to sharpen attention to a token if it is hazzy
         self.tau = getattr(config, 'tau', 1.0)
     
-    def forward(self, x: torch.Tensor, freqs_cis: torch.Tensor, use_cache: bool = False, cache_state: tuple = None, return_attention: bool = False, attn_mask: torch.Tensor = None, head_mask: torch.Tensor = None, x_abstracted: torch.Tensor = None, is_rev_phase: torch.Tensor = None) -> tuple:
+    def forward(self, x: torch.Tensor, freqs_cis: torch.Tensor, use_cache: bool = False, cache_state: tuple = None, return_attention: bool = False, attn_mask: torch.Tensor = None, head_mask: torch.Tensor = None) -> tuple:
         B, T, C = x.size()
         
         if self.use_mohsa:
@@ -216,106 +213,6 @@ class CausalSelfAttention(nn.Module):
 
             y = self.c_proj(y)
             return y, cache_state, attn_weights
-
-        if x_abstracted is not None:
-            # Project QKV for standard stream
-            qkv_standard = self.c_attn(x)
-            q_std, k_std, v_std = qkv_standard.split(self.n_embd, dim=2)
-            
-            # Project QKV for abstracted stream
-            qkv_abstracted = self.c_attn(x_abstracted)
-            q_abs, k_abs, v_abs = qkv_abstracted.split(self.n_embd, dim=2)
-            
-            # Reshape for multi-head attention: (B, T, n_head, head_dim)
-            q_std = q_std.view(B, T, self.n_head, C // self.n_head)
-            k_std = k_std.view(B, T, self.n_head, C // self.n_head)
-            v_std = v_std.view(B, T, self.n_head, C // self.n_head)
-            
-            q_abs = q_abs.view(B, T, self.n_head, C // self.n_head)
-            k_abs = k_abs.view(B, T, self.n_head, C // self.n_head)
-            v_abs = v_abs.view(B, T, self.n_head, C // self.n_head)
-            
-            offset = 0
-            if use_cache and cache_state is not None:
-                # cache_state is (k_cache_std, v_cache_std, k_cache_abs, v_cache_abs)
-                offset = cache_state[0].size(2)
-                
-            # Apply RoPE
-            if freqs_cis is not None:
-                q_std, k_std = apply_rotary_emb(q_std, k_std, freqs_cis[offset : offset + T])
-                q_abs, k_abs = apply_rotary_emb(q_abs, k_abs, freqs_cis[offset : offset + T])
-                
-            # Transpose to (B, n_head, T, head_dim)
-            q_std = q_std.transpose(1, 2)
-            k_std = k_std.transpose(1, 2)
-            v_std = v_std.transpose(1, 2)
-            
-            q_abs = q_abs.transpose(1, 2)
-            k_abs = k_abs.transpose(1, 2)
-            v_abs = v_abs.transpose(1, 2)
-            
-            if self.tau < 1.0 and self.tau > 0.0:
-                q_std = q_std / self.tau
-                q_abs = q_abs / self.tau
-                
-            if use_cache:
-                if cache_state is not None:
-                    k_cache_std, v_cache_std, k_cache_abs, v_cache_abs = cache_state
-                    k_std = torch.cat([k_cache_std, k_std], dim=2)
-                    v_std = torch.cat([v_cache_std, v_std], dim=2)
-                    k_abs = torch.cat([k_cache_abs, k_abs], dim=2)
-                    v_abs = torch.cat([v_cache_abs, v_abs], dim=2)
-                cache_state = (k_std, v_std, k_abs, v_abs)
-                
-            # Calculate standard scores and abstracted scores
-            scores_std = (q_std @ k_std.transpose(-2, -1)) * (1.0 / math.sqrt(k_std.size(-1)))
-            scores_abs = (q_abs @ k_abs.transpose(-2, -1)) * (1.0 / math.sqrt(k_abs.size(-1)))
-            
-            is_causal = (T > 1)
-            if self.use_recency_bias:
-                rb = self.recency_bias(T, k_std.size(2), offset, x.device)
-                scores_std = scores_std + rb
-                scores_abs = scores_abs + rb
-                
-            # Apply causal mask and phase masks
-            if is_causal:
-                q_idx = torch.arange(offset, offset + T, device=x.device).view(-1, 1)
-                k_idx = torch.arange(k_std.size(2), device=x.device).view(1, -1)
-                mask = q_idx < k_idx
-                if attn_mask is not None:
-                    mask = mask | ~attn_mask.squeeze(1)
-                scores_std = scores_std.masked_fill(mask.unsqueeze(1), float('-inf'))
-                scores_abs = scores_abs.masked_fill(mask.unsqueeze(1), float('-inf'))
-            elif attn_mask is not None:
-                if attn_mask.dtype == torch.bool:
-                    scores_std = scores_std.masked_fill(~attn_mask, float('-inf'))
-                    scores_abs = scores_abs.masked_fill(~attn_mask, float('-inf'))
-                else:
-                    scores_std = scores_std + attn_mask
-                    scores_abs = scores_abs + attn_mask
-                    
-            attn_probs_std = F.softmax(scores_std, dim=-1)
-            attn_probs_abs = F.softmax(scores_abs, dim=-1)
-            
-            if head_mask is not None:
-                hm = head_mask.view(1, -1, 1, 1)
-                attn_probs_std = attn_probs_std * hm
-                attn_probs_abs = attn_probs_abs * hm
-                
-            # For standard stream: mix the standard and abstracted probabilities based on phase
-            is_rev_expanded = is_rev_phase.view(B, 1, T, 1)
-            attn_probs_mixed = torch.where(is_rev_expanded, attn_probs_abs, attn_probs_std)
-            
-            y_std = attn_probs_mixed @ v_std
-            y_abs = attn_probs_abs @ v_abs
-            
-            y_std = y_std.transpose(1, 2).contiguous().view(B, T, C)
-            y_abs = y_abs.transpose(1, 2).contiguous().view(B, T, C)
-            
-            y_std = self.c_proj(y_std)
-            y_abs = self.c_proj(y_abs)
-            
-            return y_std, y_abs, cache_state, attn_probs_mixed
 
         # Standard Attention below
         qkv = self.c_attn(x)
@@ -446,74 +343,30 @@ class Block(nn.Module):
             self.attn_alpha = nn.Parameter(torch.zeros(1))
             self.mlp_alpha = nn.Parameter(torch.zeros(1))
     
-    def forward(self, x: torch.Tensor, freqs_cis: torch.Tensor, use_cache: bool = False, cache_state: tuple = None, return_attention: bool = False, attn_mask: torch.Tensor = None, head_mask: torch.Tensor = None, x_abstracted: torch.Tensor = None, is_rev_phase: torch.Tensor = None) -> tuple:
-        if x_abstracted is not None:
-            norm_x_std = self.ln_1(x)
-            norm_x_abs = self.ln_1(x_abstracted)
-            
-            attn_out_std, attn_out_abs, cache_out, weights = self.attn(
-                norm_x_std, freqs_cis, use_cache=use_cache, cache_state=cache_state,
-                return_attention=return_attention, attn_mask=attn_mask, head_mask=head_mask,
-                x_abstracted=norm_x_abs, is_rev_phase=is_rev_phase
-            )
-            
-            if self.use_gated_residual:
-                attn_gate_std = torch.sigmoid(self.attn_gate_proj(norm_x_std))
-                x = x + attn_gate_std * attn_out_std
-                
-                attn_gate_abs = torch.sigmoid(self.attn_gate_proj(norm_x_abs))
-                x_abstracted = x_abstracted + attn_gate_abs * attn_out_abs
-            elif self.use_rezero:
-                x = x + self.attn_alpha * attn_out_std
-                x_abstracted = x_abstracted + self.attn_alpha * attn_out_abs
-            else:
-                x = x + attn_out_std
-                x_abstracted = x_abstracted + attn_out_abs
-                
-            norm_x_mlp_std = self.ln_2(x)
-            mlp_out_std = self.mlp(norm_x_mlp_std)
-            
-            norm_x_mlp_abs = self.ln_2(x_abstracted)
-            mlp_out_abs = self.mlp(norm_x_mlp_abs)
-            
-            if self.use_gated_residual:
-                mlp_gate_std = torch.sigmoid(self.mlp_gate_proj(norm_x_mlp_std))
-                x = x + mlp_gate_std * mlp_out_std
-                
-                mlp_gate_abs = torch.sigmoid(self.mlp_gate_proj(norm_x_mlp_abs))
-                x_abstracted = x_abstracted + mlp_gate_abs * mlp_out_abs
-            elif self.use_rezero:
-                x = x + self.mlp_alpha * mlp_out_std
-                x_abstracted = x_abstracted + self.mlp_alpha * mlp_out_abs
-            else:
-                x = x + mlp_out_std
-                x_abstracted = x_abstracted + mlp_out_abs
-                
-            return x, x_abstracted, cache_out, weights
+    def forward(self, x: torch.Tensor, freqs_cis: torch.Tensor, use_cache: bool = False, cache_state: tuple = None, return_attention: bool = False, attn_mask: torch.Tensor = None, head_mask: torch.Tensor = None) -> tuple:
+        norm_x_attn = self.ln_1(x)
+        attn_out, cache_out, weights = self.attn(norm_x_attn, freqs_cis, use_cache=use_cache, cache_state=cache_state, return_attention=return_attention, attn_mask=attn_mask, head_mask=head_mask)
+        
+        if self.use_gated_residual:
+            attn_gate = torch.sigmoid(self.attn_gate_proj(norm_x_attn))
+            x = x + attn_gate * attn_out
+        elif self.use_rezero:
+            x = x + self.attn_alpha * attn_out
         else:
-            norm_x_attn = self.ln_1(x)
-            attn_out, cache_out, weights = self.attn(norm_x_attn, freqs_cis, use_cache=use_cache, cache_state=cache_state, return_attention=return_attention, attn_mask=attn_mask, head_mask=head_mask)
+            x = x + attn_out
             
-            if self.use_gated_residual:
-                attn_gate = torch.sigmoid(self.attn_gate_proj(norm_x_attn))
-                x = x + attn_gate * attn_out
-            elif self.use_rezero:
-                x = x + self.attn_alpha * attn_out
-            else:
-                x = x + attn_out
-                
-            norm_x_mlp = self.ln_2(x)
-            mlp_out = self.mlp(norm_x_mlp)
+        norm_x_mlp = self.ln_2(x)
+        mlp_out = self.mlp(norm_x_mlp)
+        
+        if self.use_gated_residual:
+            mlp_gate = torch.sigmoid(self.mlp_gate_proj(norm_x_mlp))
+            x = x + mlp_gate * mlp_out
+        elif self.use_rezero:
+            x = x + self.mlp_alpha * mlp_out
+        else:
+            x = x + mlp_out
             
-            if self.use_gated_residual:
-                mlp_gate = torch.sigmoid(self.mlp_gate_proj(norm_x_mlp))
-                x = x + mlp_gate * mlp_out
-            elif self.use_rezero:
-                x = x + self.mlp_alpha * mlp_out
-            else:
-                x = x + mlp_out
-                
-            return x, cache_out, weights
+        return x, cache_out, weights
 
 class CounterHead(nn.Module):
     def __init__(self, config: GPTConfig):
@@ -562,7 +415,7 @@ class CoordinateHead(nn.Module):
         self.q_proj = nn.Linear(self.n_embd, self.n_heads * self.head_dim)
         self.k_proj = nn.Linear(self.n_embd, self.n_heads * self.head_dim)
         self.out_proj = nn.Linear(self.n_heads, self.n_embd)
-        self.scale = nn.Parameter(torch.tensor(0.5), requires_grad=not getattr(config, 'freeze_coord_scale', False)) # Learnable scale initialized to 0.5 (reduced gradient bottleneck)
+        self.scale = nn.Parameter(torch.tensor(0.5)) # Learnable scale initialized to 0.5 (reduced gradient bottleneck)
         self.block_size = config.block_size
 
     def forward(self, x, use_cache=False, cache_state=None, attn_mask=None):
@@ -798,34 +651,7 @@ class GPT(nn.Module):
                 # Standard causal inference (no additional mask needed beyond is_causal=True)
                 attn_mask = None
 
-        is_rev_phase = None
-        if getattr(self.config, 'use_digit_abstraction', False):
-            if T > 1:
-                if self.config.phase_token_ids is not None:
-                    phase_tensor = torch.tensor(self.config.phase_token_ids, device=idx.device)
-                    is_phase_shift_local = torch.isin(idx, phase_tensor)
-                else:
-                    is_phase_shift_local = (idx == 10) | (idx == 11) | (idx == 12)
-                global_phase_ids_local = is_phase_shift_local.cumsum(dim=-1)
-                max_phase_local = global_phase_ids_local[:, -1:] # (B, 1)
-                is_rev_phase = (global_phase_ids_local % 2 == 1) | ((global_phase_ids_local == max_phase_local) & (global_phase_ids_local > 0))
-            else:
-                if full_phase_ids is not None:
-                    current_phase_ids = full_phase_ids[:, -1:] # (B, 1)
-                    max_phase_local = full_phase_ids.max(dim=-1, keepdim=True).values # (B, 1)
-                    is_rev_phase = (current_phase_ids % 2 == 1) | ((current_phase_ids == max_phase_local) & (current_phase_ids > 0))
-                else:
-                    is_rev_phase = torch.zeros((B, 1), dtype=torch.bool, device=idx.device)
-
-        if getattr(self.config, 'use_digit_abstraction', False):
-            idx_abstracted = idx.clone()
-            digit_mask = (idx >= 13) & (idx <= 22)
-            idx_abstracted[digit_mask] = 13
-            x_standard = self.transformer.wte(idx)
-            x_abstracted = self.transformer.wte(idx_abstracted)
-        else:
-            x_standard = self.transformer.wte(idx)
-            x_abstracted = None
+        x = self.transformer.wte(idx)
         
         freqs_cis = self.freqs_cis
         # present_key_values must be pre-allocated in slot order:
@@ -834,7 +660,7 @@ class GPT(nn.Module):
         # We pre-fill with None so mid-loop heads can write to their slot by index.
         present_key_values = [None] * (self.n_counter + self.n_coord + self.config.n_layer) if use_cache else None
 
-        def _apply_counter_heads_at(layer_idx, x_std, x_abs=None):
+        def _apply_counter_heads_at(layer_idx, x):
             """Inject all CounterHeads registered at layer_idx into x (residual add).
             Updates present_key_values in-place if use_cache is True.
             layer_idx == -1 means before all transformer blocks."""
@@ -847,20 +673,13 @@ class GPT(nn.Module):
                     if (past_key_values is not None and cache_slot < len(past_key_values))
                     else None
                 )
-                if x_abs is not None:
-                    cnt_out, cache_out = head(x_abs, use_cache=use_cache, cache_state=cache_in)
-                    x_std = x_std + cnt_out
-                    x_abs = x_abs + cnt_out
-                else:
-                    cnt_out, cache_out = head(x_std, use_cache=use_cache, cache_state=cache_in)
-                    x_std = x_std + cnt_out
+                cnt_out, cache_out = head(x, use_cache=use_cache, cache_state=cache_in)
+                x = x + cnt_out
                 if use_cache:
                     present_key_values[cache_slot] = cache_out
-            if x_abs is not None:
-                return x_std, x_abs
-            return x_std
+            return x
 
-        def _apply_coordinate_heads_at(layer_idx, x_std, x_abs=None, attn_mask=None):
+        def _apply_coordinate_heads_at(layer_idx, x, attn_mask=None):
             """Inject all CoordinateHeads registered at layer_idx into x (residual add).
             Updates present_key_values in-place if use_cache is True.
             layer_idx == -1 means before all transformer blocks."""
@@ -873,28 +692,16 @@ class GPT(nn.Module):
                     if (past_key_values is not None and cache_slot < len(past_key_values))
                     else None
                 )
-                if x_abs is not None:
-                    crd_out, cache_out = head(x_abs, use_cache=use_cache, cache_state=cache_in, attn_mask=attn_mask)
-                    x_std = x_std + crd_out
-                    x_abs = x_abs + crd_out
-                else:
-                    crd_out, cache_out = head(x_std, use_cache=use_cache, cache_state=cache_in, attn_mask=attn_mask)
-                    x_std = x_std + crd_out
+                crd_out, cache_out = head(x, use_cache=use_cache, cache_state=cache_in, attn_mask=attn_mask)
+                x = x + crd_out
                 if use_cache:
                     present_key_values[cache_slot] = cache_out
-            if x_abs is not None:
-                return x_std, x_abs
-            return x_std
+            return x
 
         # --- Inject CounterHeads registered at layer -1 (before transformer) ---
-        if x_abstracted is not None:
-            x_standard, x_abstracted = _apply_counter_heads_at(-1, x_standard, x_abs=x_abstracted)
-            # --- Inject CoordinateHeads registered at layer -1 ---
-            x_standard, x_abstracted = _apply_coordinate_heads_at(-1, x_standard, x_abs=x_abstracted, attn_mask=attn_mask)
-        else:
-            x_standard = _apply_counter_heads_at(-1, x_standard)
-            # --- Inject CoordinateHeads registered at layer -1 ---
-            x_standard = _apply_coordinate_heads_at(-1, x_standard, attn_mask=attn_mask)
+        x = _apply_counter_heads_at(-1, x)
+        # --- Inject CoordinateHeads registered at layer -1 ---
+        x = _apply_coordinate_heads_at(-1, x, attn_mask)
 
         all_weights = [] if return_attention else None
         
@@ -912,11 +719,7 @@ class GPT(nn.Module):
             for i in range(max_passes):
                 # Cycle pass_emb if we exceed trained depth
                 emb_idx = i % self.config.n_layer
-                if x_abstracted is not None:
-                    x_standard = x_standard + self.pass_emb[emb_idx].view(1, 1, -1)
-                    x_abstracted = x_abstracted + self.pass_emb[emb_idx].view(1, 1, -1)
-                else:
-                    x_standard = x_standard + self.pass_emb[emb_idx].view(1, 1, -1)
+                x = x + self.pass_emb[emb_idx].view(1, 1, -1)
                 
                 # Each pass in the universal loop gets its own KV cache entry
                 cache_idx = self.n_counter + self.n_coord + i
@@ -925,10 +728,7 @@ class GPT(nn.Module):
                 if head_mask is not None:
                     h_mask = head_mask[i]
                     
-                if x_abstracted is not None:
-                    x_standard, x_abstracted, cache_out, weights = self.transformer.h(x_standard, block_freqs, use_cache=use_cache, cache_state=cache_in, return_attention=return_attention, attn_mask=attn_mask, head_mask=h_mask, x_abstracted=x_abstracted, is_rev_phase=is_rev_phase)
-                else:
-                    x_standard, cache_out, weights = self.transformer.h(x_standard, block_freqs, use_cache=use_cache, cache_state=cache_in, return_attention=return_attention, attn_mask=attn_mask, head_mask=h_mask)
+                x, cache_out, weights = self.transformer.h(x, block_freqs, use_cache=use_cache, cache_state=cache_in, return_attention=return_attention, attn_mask=attn_mask, head_mask=h_mask)
                 
                 if use_cache:
                     present_key_values[cache_idx] = cache_out
@@ -936,21 +736,16 @@ class GPT(nn.Module):
                     all_weights.append(weights)
 
                 # --- Inject CounterHeads registered after this pass index ---
-                if x_abstracted is not None:
-                    x_standard, x_abstracted = _apply_counter_heads_at(i, x_standard, x_abs=x_abstracted)
-                    # --- Inject CoordinateHeads registered after this pass index ---
-                    x_standard, x_abstracted = _apply_coordinate_heads_at(i, x_standard, x_abs=x_abstracted, attn_mask=attn_mask)
-                else:
-                    x_standard = _apply_counter_heads_at(i, x_standard)
-                    # --- Inject CoordinateHeads registered after this pass index ---
-                    x_standard = _apply_coordinate_heads_at(i, x_standard, attn_mask=attn_mask)
+                x = _apply_counter_heads_at(i, x)
+                # --- Inject CoordinateHeads registered after this pass index ---
+                x = _apply_coordinate_heads_at(i, x, attn_mask)
                 
                 # --- Logit Stability Halting ---
                 if halt_on_logit_stability is not None:
                     # Project current state to logits for the LAST token only
                     # This tells us the model's current "best guess"
                     with torch.no_grad():
-                        last_x = self.transformer.ln_f(x_standard[:, -1, :])
+                        last_x = self.transformer.ln_f(x[:, -1, :])
                         current_logits = self.lm_head(last_x)
                         current_token = torch.argmax(current_logits, dim=-1)
                     
@@ -972,7 +767,7 @@ class GPT(nn.Module):
 
                 # --- Early Stopping (Distance-based) ---
                 if halt_threshold is not None and prev_x is not None:
-                    diff = torch.norm(x_standard - prev_x, p=2, dim=-1).mean()
+                    diff = torch.norm(x - prev_x, p=2, dim=-1).mean()
                     if diff < halt_threshold:
                         if use_cache:
                             for j in range(i + 1, max_passes):
@@ -982,32 +777,24 @@ class GPT(nn.Module):
                                 all_weights.append(weights)
                         break
                 
-                prev_x = x_standard
+                prev_x = x
         else:
             # Standard model: num_passes/halt_threshold is ignored
             for i, block in enumerate(self.transformer.h):
                 cache_idx = self.n_counter + self.n_coord + i
                 cache_in = past_key_values[cache_idx] if (past_key_values is not None and cache_idx < len(past_key_values)) else None
-                if x_abstracted is not None:
-                    x_standard, x_abstracted, cache_out, weights = block(x_standard, block_freqs, use_cache=use_cache, cache_state=cache_in, return_attention=return_attention, attn_mask=attn_mask, x_abstracted=x_abstracted, is_rev_phase=is_rev_phase)
-                else:
-                    x_standard, cache_out, weights = block(x_standard, block_freqs, use_cache=use_cache, cache_state=cache_in, return_attention=return_attention, attn_mask=attn_mask)
+                x, cache_out, weights = block(x, block_freqs, use_cache=use_cache, cache_state=cache_in, return_attention=return_attention, attn_mask=attn_mask)
                 if use_cache:
                     present_key_values[cache_idx] = cache_out
                 if return_attention:
                     all_weights.append(weights)
 
                 # --- Inject CounterHeads registered after block i ---
-                if x_abstracted is not None:
-                    x_standard, x_abstracted = _apply_counter_heads_at(i, x_standard, x_abs=x_abstracted)
-                    # --- Inject CoordinateHeads registered after block i ---
-                    x_standard, x_abstracted = _apply_coordinate_heads_at(i, x_standard, x_abs=x_abstracted, attn_mask=attn_mask)
-                else:
-                    x_standard = _apply_counter_heads_at(i, x_standard)
-                    # --- Inject CoordinateHeads registered after block i ---
-                    x_standard = _apply_coordinate_heads_at(i, x_standard, attn_mask=attn_mask)
+                x = _apply_counter_heads_at(i, x)
+                # --- Inject CoordinateHeads registered after block i ---
+                x = _apply_coordinate_heads_at(i, x, attn_mask)
             
-        x = self.transformer.ln_f(x_standard)
+        x = self.transformer.ln_f(x)
         
         loss = None
         if targets is not None:
