@@ -259,7 +259,29 @@ def main():
             count = 0
             with open(output_path, "w", encoding="utf-8") as f:
                 while count < num_samples:
-                    sample = generator()
+                    r = random.random()
+                    if lesson_idx == 1:
+                        sampled_lesson = 1
+                    elif lesson_idx == 2:
+                        sampled_lesson = 2 if r < 0.85 else 1
+                    elif lesson_idx == 3:
+                        if r < 0.80:
+                            sampled_lesson = 3
+                        elif r < 0.90:
+                            sampled_lesson = 2
+                        else:
+                            sampled_lesson = 1
+                    elif lesson_idx == 4:
+                        if r < 0.80:
+                            sampled_lesson = 4
+                        elif r < 0.90:
+                            sampled_lesson = 3
+                        elif r < 0.95:
+                            sampled_lesson = 2
+                        else:
+                            sampled_lesson = 1
+                            
+                    sample = lessons[sampled_lesson]()
                     tokens = tokenizer.encode(sample + "\n")
                     if len(tokens) <= args.max_token_len:
                         f.write(sample + "\n")

@@ -152,3 +152,23 @@ When running validation:
 uv run rpn_lessons/val.py --lesson 1 --checkpoint rpn_lessons/models/lesson1_final.pt
 ```
 If the gate is passed, training for the next lesson is launched using the `--checkpoint` argument to load the previous checkpoint's weights.
+
+---
+
+## 7. Current Progress & Training History
+
+### Lesson 1: Reversal (Complete)
+* **Status**: Completed at 40,000 steps.
+* **Checkpoint**: `rpn_lessons/models/lesson1_step40000.pt`
+* **Validation Results**: Obtained **100.00% exact match accuracy** on 1,000 validation prompts using `val.py`.
+* **Gating Status**: **PASSED** (Gate: $\ge 99.0\%$).
+* **Execution Parameters**: `batch_size = 64`, `grad_accum_steps = 1`, `T = 384`. Hitting ~100,000 tokens/second on MPS.
+* **Transition**: Ready for Lesson 2.
+
+### Lesson 2: Multi-Reversal (Complete)
+* **Status**: Completed at 40,000 steps.
+* **Checkpoint**: `rpn_lessons/models/lesson2_step40000.pt`
+* **Validation Results**: Obtained **100.00% exact match accuracy** on 500 validation prompts for both Lesson 2 and Lesson 1.
+* **Gating Status**: **PASSED** (Gate: $\ge 98.0\%$).
+* **Execution Parameters**: `batch_size = 64`, `grad_accum_steps = 1`, `T = 384`.
+* **Transition**: Ready for Lesson 3.

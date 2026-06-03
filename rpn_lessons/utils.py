@@ -108,9 +108,6 @@ class DataLoaderLite:
         all_tokens = []
         all_masks = []
         
-        sep_id = self.tokenizer.vocab.get(self.delimiter_token)
-        if sep_id is None:
-            raise ValueError(f"Delimiter token '{self.delimiter_token}' not found in vocabulary.")
         nl_id = self.tokenizer.vocab.get("\n")
         pad_id = self.tokenizer.vocab.get("[PAD]", 0)
         
@@ -119,6 +116,23 @@ class DataLoaderLite:
             # Clean spaces: strip leading/trailing and compress multiple spaces to one
             clean_line = re.sub(r'\s+', ' ', line.strip()) + '\n'
             line_tokens = self.tokenizer.encode(clean_line)
+            
+            # Dynamically determine delimiter based on prompt prefix and content
+            if clean_line.startswith("[BOS]"):
+                delim = "[REV]"
+            elif clean_line.startswith("[REV]"):
+                if "[ANS]" in clean_line:
+                    delim = "[ANS]"
+                else:
+                    delim = "[MATH]"
+            elif clean_line.startswith("[MATH]"):
+                delim = "[REV]"
+            else:
+                delim = self.delimiter_token # fallback
+                
+            sep_id = self.tokenizer.vocab.get(delim)
+            if sep_id is None:
+                raise ValueError(f"Delimiter token '{delim}' not found in vocabulary.")
             
             # Build mask: 0 for prompt, 1 for solution
             is_solution = False
