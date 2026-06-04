@@ -129,10 +129,12 @@ def generate_math_steps(a_str, b_str, op):
 def generate_lesson1_sample(max_digits=22):
     L = random.randint(1, max_digits)
     num = generate_number(L)
-    if random.random() < 0.5 and num != "0":
-        num = "-" + num
-    rev = reverse_string(num)
-    return f"[REV]{num}[ANS]{rev}[EOS]"
+    is_negative = random.random() < 0.5 and num != "0"
+    
+    if is_negative:
+        return f"[REV]-<num>{num}</num>[ANS]-<num>{num[::-1]}</num>[EOS]"
+    else:
+        return f"[REV]<num>{num}</num>[ANS]<num>{num[::-1]}</num>[EOS]"
 
 def generate_lesson2_sample(max_numbers=6, max_digits=9):
     N = random.randint(1, max_numbers)

@@ -20,6 +20,9 @@ def main():
     parser.add_argument("--grad_accum_steps", type=int, default=2, help="Gradient accumulation steps")
     parser.add_argument("--device", type=str, default=None)
     parser.add_argument("--wandb_project", type=str, default="rpn-curriculum")
+    parser.add_argument("--n_counter", type=int, default=2)
+    parser.add_argument("--n_coord", type=int, default=2)
+    parser.add_argument("--run_name_suffix", type=str, default="", help="Suffix for checkpoint and wandb run name")
     args = parser.parse_args()
     
     # Auto-detect device
@@ -88,10 +91,10 @@ def main():
             mlp_ratio=4, 
             bos_token_id=bos_id, 
             phase_token_ids=phase_token_ids,
-            n_counter=2, 
+            n_counter=args.n_counter, 
             n_buckets=4, 
-            n_coord=2, 
-            n_coord_heads=4,
+            n_coord=args.n_coord, 
+            n_coord_heads=4 if args.n_coord > 0 else 0,
             freeze_coord_scale=False
         )
         
@@ -127,6 +130,8 @@ def main():
     
     # Initialize WandB
     run_name = f"lesson{args.lesson}_ut_1.5M_T384"
+    if args.run_name_suffix:
+        run_name += f"_{args.run_name_suffix}"
     if args.checkpoint is not None:
         run_name += "_warmstart"
         
@@ -217,14 +222,14 @@ def main():
             val_loss = val_loss_accum / 10
             
             # 2. Run autoregressive exact-match accuracy validation
-            # Check 150 samples during training to keep it quick
+            # Check 50 samples during training to keep it quick
             em_accuracy = run_lesson_validation(
                 model=model,
                 tokenizer=tokenizer,
                 data_path=val_path,
                 lesson=args.lesson,
                 device=device,
-                num_samples=150
+                num_samples=40
             )
             
             print(f"--> Step {step + 1} Eval: Val Loss: {val_loss:.5f} | Exact Match Accuracy: {em_accuracy:.2f}%", flush=True)
@@ -237,8 +242,13 @@ def main():
             model.train()
             
         # Save checkpoints
-        if (step + 1) % 10000 == 0 or (step + 1) == max_steps:
-            checkpoint_path = os.path.join(model_dir, f"lesson{args.lesson}_step{step + 1}.pt")
+        if max_steps <= 20000:
+            step_interval = 5000
+        else:
+            step_interval = 10000
+        if (step + 1) % (step_interval) == 0 or (step + 1) == max_steps:
+            suffix_str = f"_{args.run_name_suffix}" if args.run_name_suffix else ""
+            checkpoint_path = os.path.join(model_dir, f"lesson{args.lesson}{suffix_str}_step{step + 1}.pt")
             checkpoint = {
                 'model': model.state_dict(),
                 'config': config,

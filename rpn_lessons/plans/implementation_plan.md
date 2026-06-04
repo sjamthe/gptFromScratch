@@ -172,3 +172,65 @@ If the gate is passed, training for the next lesson is launched using the `--che
 * **Gating Status**: **PASSED** (Gate: $\ge 98.0\%$).
 * **Execution Parameters**: `batch_size = 64`, `grad_accum_steps = 1`, `T = 384`.
 * **Transition**: Ready for Lesson 3.
+
+### Lesson 3: Math & Copying (Complete)
+* **Status**: Completed at 80,000 steps.
+* **Checkpoint**: `rpn_lessons/models/lesson3_step80000.pt`
+* **Validation Results**: Obtained **100.00% exact match accuracy** on validation sets for Lessons 1, 2, and 3.
+* **Gating Status**: **PASSED** (Gate: $\ge 98.0\%$).
+* **Execution Parameters**: `batch_size = 64`, `grad_accum_steps = 1`, `T = 384`.
+* **Transition**: Ready for Lesson 4.
+
+### Lesson 4: Result Reversal & Phase Transition (Complete)
+* **Status**: Completed at 40,000 steps.
+* **Checkpoint**: `rpn_lessons/models/lesson4_step40000.pt`
+* **Validation Results**: Obtained **100.00% exact match accuracy** on all validation sets.
+* **Gating Status**: **PASSED** (Gate: $\ge 99.0\%$).
+* **Execution Parameters**: `batch_size = 64`, `grad_accum_steps = 1`, `T = 384`.
+
+---
+
+## 8. Out-of-Distribution (OOD) Testing Plan
+
+We will create a structured OOD evaluation pipeline to measure model generalization along three dimensions: **Digit Length (Arithmetic/Reversal Scale)**, **Operand Count (Workspace/Routing Capacity)**, and **End-to-End State Machine Integration**. 
+Following scientific best practices, we will isolate variables and test only **one OOD dimension at a time**, gradually increasing by a step of 1 above the maximum trained limits to find exactly where the logic degrades. All tests will be run against the final `lesson4_step40000.pt` checkpoint.
+
+### OOD Test Scenarios
+
+#### 1. Lesson 1: Reversal Generalization (Digit-scale)
+* **In-Distribution (ID)**: 1 to 22 digits.
+* **OOD Test Cases (Gradual increment)**:
+  * Positive and negative numbers from **23 to 30 digits** (testing 23, 24, 25, 26, 27, 28, 29, and 30 digits individually).
+* **Goal**: Find the exact digit length at which the reverse-pointer logic degrades.
+
+#### 2. Lesson 2: Multi-operand Reversal Generalization (Workspace capacity)
+* **ID**: 1 to 6 operands, up to 9 digits each.
+* **OOD Test Cases (Single-dimension increments)**:
+  * **OOD Digits (ID Operands)**: 10, 11, 12, and 13 digits (using exactly 2 operands).
+  * **OOD Operands (ID Digits)**: 7, 8, 9, and 10 operands (using exactly 4 digits).
+* **Goal**: Measure performance boundaries for digit lengths and operand counts independently.
+
+#### 3. Lesson 3: Step-by-Step Math Generalization (Alignment & Carry propagation)
+* **ID**: 2 to 6 operands, up to 9 digits each.
+* **OOD Test Cases (Single-dimension increments)**:
+  * **OOD Digits (ID Operands)**: 10, 11, 12, and 13 digits (using exactly 2 operands, mixed signs).
+  * **OOD Operands (ID Digits)**: 7, 8, 9, and 10 operands (using exactly 4 digits).
+* **Goal**: Identify at which length the digit alignment or carry propagation fails.
+
+#### 4. Lesson 4: Result Reversal & Phase Transitions
+* **ID**: 2 to 6 operands, up to 9 digits each.
+* **OOD Test Cases (Single-dimension increments)**:
+  * **OOD Digits (ID Operands)**: 10, 11, 12, and 13 digits (using exactly 2 operands).
+  * **OOD Operands (ID Digits)**: 7, 8, 9, and 10 operands (using exactly 4 digits).
+* **Goal**: Verify if result reversal and transition markers remain correct under gradual OOD scale changes.
+
+#### 5. End-to-End Joint Evaluation (State Machine)
+* Run complete RPN calculations using the new state-machine wrapper on:
+  * **Gradual OOD Digits**: 10, 11, and 12 digits (with exactly 3 operands).
+  * **Gradual OOD Operands**: 7, 8, 9, and 10 operands (with exactly 4 digits).
+
+### Execution Strategy
+
+1. **Dataset Generation**: We will write [`generate_ood_data.py`](file:///Users/sjamthe/Documents/GithubRepos/gptFromScratch/rpn_lessons/generate_ood_data.py) to automatically produce OOD files under `rpn_lessons/data/ood/`.
+2. **Evaluation Script**: We will write [`run_ood_evaluation.py`](file:///Users/sjamthe/Documents/GithubRepos/gptFromScratch/rpn_lessons/run_ood_evaluation.py) to execute the tests on the final `lesson4_step40000.pt` checkpoint, measuring exact-match accuracy and logging exact failure points.
+3. **Formatted Report**: Compile performance data and analysis into a new artifact `curriculum_ood_report.md`.
