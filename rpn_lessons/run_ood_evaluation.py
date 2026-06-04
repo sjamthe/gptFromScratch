@@ -96,7 +96,7 @@ def run_e2e_state_machine_eval(model, tokenizer, data_path, device):
             current_prompt = last_delim + gen_str
             
             if gen_str.endswith("[EOS]"):
-                final_decoded = gen_str.replace("[EOS]", "").strip()
+                final_decoded = gen_str.replace("[EOS]", "").replace("<num>", "").replace("</num>", "").strip()
                 # Compare as integers to handle leading zero padding
                 try:
                     if int(final_decoded) == int(gt_ans):
@@ -117,13 +117,26 @@ def run_e2e_state_machine_eval(model, tokenizer, data_path, device):
     return accuracy
 
 def main():
-    device = 'cuda' if torch.cuda.is_available() else 'mps' if torch.backends.mps.is_available() else 'cpu'
-    checkpoint_path = os.path.join(lessons_dir, "models/lesson4_step40000.pt")
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--checkpoint", type=str, default=None)
+    parser.add_argument("--device", type=str, default=None)
+    args = parser.parse_args()
+    
+    if args.device is not None:
+        device = args.device
+    else:
+        device = 'cuda' if torch.cuda.is_available() else 'mps' if torch.backends.mps.is_available() else 'cpu'
+        
+    if args.checkpoint is not None:
+        checkpoint_path = args.checkpoint
+    else:
+        checkpoint_path = os.path.join(lessons_dir, "models/lesson4_wrappedNum_step40000.pt")
     
     print(f"Loading checkpoint {checkpoint_path} on {device}...")
     checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
     config = checkpoint['config']
-    config.block_size = 384
+    config.block_size = 768
     
     model = GPT(config)
     model.load_state_dict(checkpoint['model'])

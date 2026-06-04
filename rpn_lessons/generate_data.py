@@ -124,6 +124,12 @@ def generate_math_steps(a_str, b_str, op):
     assert int(ans_str) == ans, f"Math logic failure: scratchpad derived {ans_str}, expected {ans}"
     return steps_str, ans_rev, ans_str
 
+# --- Helper to wrap magnitudes ---
+def wrap_num(s):
+    if s.startswith('-'):
+        return '-<num>' + s[1:] + '</num>'
+    return '<num>' + s + '</num>'
+
 # --- Lesson generators ---
 
 def generate_lesson1_sample(max_digits=22):
@@ -149,16 +155,16 @@ def generate_lesson2_sample(max_numbers=6, max_digits=9):
     ops = [random.choice(['+', '-']) for _ in range(N - 1)]
     
     # Prompt construction
-    prompt_parts = [f"[BOS]{numbers[0]}"]
+    prompt_parts = [f"[BOS]{wrap_num(numbers[0])}"]
     for i in range(1, N):
-        prompt_parts.append(f"{numbers[i]}{ops[i-1]}")
+        prompt_parts.append(f"{wrap_num(numbers[i])}{ops[i-1]}")
     prompt = " ".join(prompt_parts) + "[REV]"
     
     # Target construction
     rev_nums = [reverse_string(n) for n in numbers]
-    target_parts = [rev_nums[0]]
+    target_parts = [wrap_num(rev_nums[0])]
     for i in range(1, N):
-        target_parts.append(f"{rev_nums[i]}{ops[i-1]}")
+        target_parts.append(f"{wrap_num(rev_nums[i])}{ops[i-1]}")
     target = "[SEP]".join(target_parts) + "[MATH]"
     
     return f"{prompt}{target}"
@@ -178,9 +184,9 @@ def generate_lesson3_sample(max_numbers=6, max_digits=9):
     rev_nums = [reverse_string(n) for n in numbers]
     
     # Input prompt: [REV]rev_n1[SEP]rev_n2<op1>[SEP]...[MATH]
-    prompt_parts = [rev_nums[0]]
+    prompt_parts = [wrap_num(rev_nums[0])]
     for i in range(1, N):
-        prompt_parts.append(f"{rev_nums[i]}{ops[i-1]}")
+        prompt_parts.append(f"{wrap_num(rev_nums[i])}{ops[i-1]}")
     prompt = "[REV]" + "[SEP]".join(prompt_parts) + "[MATH]"
     
     # Perform math steps on the first two numbers
@@ -191,7 +197,7 @@ def generate_lesson3_sample(max_numbers=6, max_digits=9):
     if N > 2:
         tail_parts = []
         for i in range(2, N):
-            tail_parts.append(f"{rev_nums[i]}{ops[i-1]}")
+            tail_parts.append(f"{wrap_num(rev_nums[i])}{ops[i-1]}")
         target += "[SEP]" + "[SEP]".join(tail_parts)
     target += "[REV]"
     
@@ -219,21 +225,22 @@ def generate_lesson4_sample(max_numbers=6, max_digits=9):
     if N > 2:
         tail_parts = []
         for i in range(2, N):
-            tail_parts.append(f"{rev_nums[i]}{ops[i-1]}")
+            tail_parts.append(f"{wrap_num(rev_nums[i])}{ops[i-1]}")
         prompt += "[SEP]" + "[SEP]".join(tail_parts)
     prompt += "[REV]"
     
     # Target: ans_rev[SEP]rev_n3<op2>...[MATH] (or [ANS] if N=2)
-    target = ans_rev
+    target = wrap_num(ans_rev)
     if N > 2:
         tail_parts = []
         for i in range(2, N):
-            tail_parts.append(f"{rev_nums[i]}{ops[i-1]}")
+            tail_parts.append(f"{wrap_num(rev_nums[i])}{ops[i-1]}")
         target += "[SEP]" + "[SEP]".join(tail_parts) + "[MATH]"
     else:
         target += "[ANS]"
         
     return f"{prompt}{target}"
+
 
 def main():
     parser = argparse.ArgumentParser()
