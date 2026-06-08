@@ -1,3 +1,4 @@
+from IPython.core import extensions
 import os
 import sys
 import torch
@@ -210,7 +211,7 @@ def main():
     # ----------------------------------------------------
     # Generate the Markdown Report
     # ----------------------------------------------------
-    report_path = "/Users/sjamthe/.gemini/antigravity-ide/brain/121d30ad-79fd-4baa-b4db-549b5b2a586f/curriculum_ood_report.md"
+    report_path = "/Users/sjamthe/.gemini/antigravity-ide/brain/121d30ad-79fd-4baa-b4db-549b5b2a586f/curriculum_ood_report_no_tie.md"
     
     print(f"\nWriting Markdown Report to {report_path}...")
     

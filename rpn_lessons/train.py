@@ -95,7 +95,8 @@ def main():
             n_buckets=4, 
             n_coord=args.n_coord, 
             n_coord_heads=4 if args.n_coord > 0 else 0,
-            freeze_coord_scale=False
+            freeze_coord_scale=False,
+            tie_weights=False
         )
         
     if config.counter_inject_layers is None and config.n_counter > 0:
@@ -134,6 +135,8 @@ def main():
         run_name += f"_{args.run_name_suffix}"
     if args.checkpoint is not None:
         run_name += "_warmstart"
+    if config.tie_weights is False:
+        run_name += "_no_tie"
         
     wandb.init(
         project=args.wandb_project,

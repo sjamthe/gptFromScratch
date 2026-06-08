@@ -40,6 +40,7 @@ class GPTConfig:
     n_coord_heads: int = 4 # number of heads in CoordinateHead
     coord_inject_layers: list = field(default=None)
     freeze_coord_scale: bool = False # Whether to freeze coordinate head scale
+    tie_weights: bool = True # Whether to tie word embedding (wte) and lm_head weights
     
 # --- RoPE Implementation ---
 def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0):
@@ -79,6 +80,18 @@ class RecencyBias(nn.Module):
         dist = (q_idx - k_idx).clamp(0, len(self.bias) - 1)
         return self.bias[dist]  # [T, T_total]
 
+def get_freqs_cis_slice(freqs_cis, offset, T, dim, theta, device):
+    if freqs_cis is None:
+        return None
+    needed_end = offset + T
+    if needed_end <= freqs_cis.shape[0]:
+        return freqs_cis[offset : needed_end]
+    # compute dynamically if out of bounds
+    freqs = 1.0 / (theta ** (torch.arange(0, dim, 2, device=device)[: (dim // 2)].float() / dim))
+    t = torch.arange(offset, needed_end, device=device, dtype=torch.float32)
+    freqs = torch.outer(t, freqs).float()
+    return torch.polar(torch.ones_like(freqs), freqs)
+
 class CausalSelfAttention(nn.Module):
     def __init__(self, config: GPTConfig):
         super().__init__()
@@ -98,6 +111,7 @@ class CausalSelfAttention(nn.Module):
 
         # Lower tau is used to sharpen attention to a token if it is hazzy
         self.tau = getattr(config, 'tau', 1.0)
+        self.rope_theta = getattr(config, 'rope_theta', 10000.0)
     
     def forward(self, x: torch.Tensor, freqs_cis: torch.Tensor, use_cache: bool = False, cache_state: tuple = None, return_attention: bool = False, attn_mask: torch.Tensor = None, head_mask: torch.Tensor = None) -> tuple:
         B, T, C = x.size()
@@ -130,9 +144,11 @@ class CausalSelfAttention(nn.Module):
                 offset_s = cache_state[2].size(2)
                 
             if freqs_cis_large is not None:
-                q_l, k_l = apply_rotary_emb(q_l, k_l, freqs_cis_large[offset_l : offset_l + T])
+                freqs_cis_large_slice = get_freqs_cis_slice(freqs_cis_large, offset_l, T, head_dim_large, self.rope_theta, x.device)
+                q_l, k_l = apply_rotary_emb(q_l, k_l, freqs_cis_large_slice)
             if freqs_cis_small is not None:
-                q_s, k_s = apply_rotary_emb(q_s, k_s, freqs_cis_small[offset_s : offset_s + T])
+                freqs_cis_small_slice = get_freqs_cis_slice(freqs_cis_small, offset_s, T, head_dim_small, self.rope_theta, x.device)
+                q_s, k_s = apply_rotary_emb(q_s, k_s, freqs_cis_small_slice)
                 
             q_l = q_l.transpose(1, 2)
             k_l = k_l.transpose(1, 2)
@@ -232,7 +248,8 @@ class CausalSelfAttention(nn.Module):
         # Apply RoPE
         if freqs_cis is not None:
             # slice freqs_cis exactly aligning to the absolute sequence indices!
-            q, k = apply_rotary_emb(q, k, freqs_cis[offset : offset + T])
+            freqs_cis_slice = get_freqs_cis_slice(freqs_cis, offset, T, C // self.n_head, self.rope_theta, x.device)
+            q, k = apply_rotary_emb(q, k, freqs_cis_slice)
             
         # Transpose for attention computation: (B, n_head, T_new, head_dim)
         q = q.transpose(1, 2)
@@ -562,7 +579,8 @@ class GPT(nn.Module):
             self.pass_emb = None
 
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
-        self.transformer.wte.weight = self.lm_head.weight
+        if getattr(config, 'tie_weights', True):
+            self.transformer.wte.weight = self.lm_head.weight
         
         # Initialize RoPE frequencies
         rope_theta = getattr(config, 'rope_theta', 10000.0)

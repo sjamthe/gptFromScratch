@@ -34,6 +34,13 @@ def main():
     lessons_dir = os.path.dirname(os.path.abspath(__file__))
     project_root = os.path.dirname(lessons_dir)
     
+    cmd_l1 = [
+        "python", "rpn_lessons/train.py",
+        "--lesson", "1",
+        "--run_name_suffix", "wrappedNum"
+    ]
+    run_command(cmd_l1, cwd=project_root)
+
     # 1. Lesson 2 Training (40k steps)
     # Warm-start from lesson1_wrappedNum_step20000.pt
     cmd_l2 = [
@@ -68,7 +75,8 @@ def main():
     # Evaluate the resulting lesson 4 model
     cmd_eval = [
         "python", "rpn_lessons/run_ood_evaluation.py",
-        "--checkpoint", "rpn_lessons/models/lesson4_wrappedNum_step40000.pt"
+        "--checkpoint", "rpn_lessons/models/lesson4_wrappedNum_step40000.pt",
+        "--device", "cpu"
     ]
     run_command(cmd_eval, cwd=project_root)
     
