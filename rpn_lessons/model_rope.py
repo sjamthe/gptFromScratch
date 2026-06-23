@@ -41,6 +41,7 @@ class GPTConfig:
     coord_inject_layers: list = field(default=None)
     freeze_coord_scale: bool = False # Whether to freeze coordinate head scale
     tie_weights: bool = True # Whether to tie word embedding (wte) and lm_head weights
+    use_universal_attn: bool = False # if True, share attention weights across all heads in self-attention
     
 # --- RoPE Implementation ---
 def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0):
@@ -96,12 +97,21 @@ class CausalSelfAttention(nn.Module):
     def __init__(self, config: GPTConfig):
         super().__init__()
         assert config.n_embd % config.n_head == 0
-        self.c_attn = nn.Linear(config.n_embd, 3 * config.n_embd)
-        self.c_proj = nn.Linear(config.n_embd, config.n_embd)
-        self.c_proj.NANO_GPT_SCALE_INIT = 1
         self.n_head = config.n_head
         self.n_embd = config.n_embd
+        self.head_dim = config.n_embd // config.n_head
+        
+        self.use_universal_attn = getattr(config, 'use_universal_attn', False)
         self.use_mohsa = getattr(config, 'use_mohsa', False)
+        assert not (self.use_mohsa and self.use_universal_attn), "Universal Attention is not currently supported with MOHSA."
+        
+        if self.use_universal_attn:
+            self.c_attn_shared = nn.Linear(self.head_dim, 3 * self.head_dim)
+        else:
+            self.c_attn = nn.Linear(config.n_embd, 3 * config.n_embd)
+            
+        self.c_proj = nn.Linear(config.n_embd, config.n_embd)
+        self.c_proj.NANO_GPT_SCALE_INIT = 1
         if self.use_mohsa:
             self.c_attn_large = nn.Linear(config.n_embd, 3 * config.n_embd)
         self.use_recency_bias = getattr(config, 'use_recency_bias', False)
@@ -232,13 +242,17 @@ class CausalSelfAttention(nn.Module):
             return y, cache_state, attn_weights
 
         # Standard Attention below
-        qkv = self.c_attn(x)
-        q,k,v = qkv.split(self.n_embd, dim=2)
-        
-        # Explicit shape for RoPE application: (B, T, n_head, head_dim)
-        q = q.view(B, T, self.n_head, C // self.n_head)
-        k = k.view(B, T, self.n_head, C // self.n_head)
-        v = v.view(B, T, self.n_head, C // self.n_head)
+        if self.use_universal_attn:
+            x_heads = x.view(B, T, self.n_head, self.head_dim)
+            qkv = self.c_attn_shared(x_heads)
+            q, k, v = qkv.split(self.head_dim, dim=-1)
+        else:
+            qkv = self.c_attn(x)
+            q,k,v = qkv.split(self.n_embd, dim=2)
+            # Explicit shape for RoPE application: (B, T, n_head, head_dim)
+            q = q.view(B, T, self.n_head, self.head_dim)
+            k = k.view(B, T, self.n_head, self.head_dim)
+            v = v.view(B, T, self.n_head, self.head_dim)
 
         offset = 0
         if use_cache and cache_state is not None:
@@ -337,6 +351,8 @@ class MLP(nn.Module):
         self.c_fc = nn.Linear(config.n_embd, config.mlp_ratio * config.n_embd)
         self.gelu = nn.GELU(approximate='tanh')
         self.c_proj = nn.Linear(config.mlp_ratio * config.n_embd, config.n_embd)
+
+        self.c_proj.NANO_GPT_SCALE_INIT = 1 # Add this line to stabilize the residual variance
     
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.c_fc(x)

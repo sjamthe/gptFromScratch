@@ -23,6 +23,7 @@ def main():
     parser.add_argument("--n_counter", type=int, default=2)
     parser.add_argument("--n_coord", type=int, default=2)
     parser.add_argument("--run_name_suffix", type=str, default="", help="Suffix for checkpoint and wandb run name")
+    parser.add_argument("--use_universal_attn", action="store_true", help="Share attention weights across all heads in self-attention")
     args = parser.parse_args()
     
     # Auto-detect device
@@ -78,6 +79,8 @@ def main():
         config.use_digit_abstraction = False
         config.phase_token_ids = phase_token_ids
         config.bos_token_id = bos_id
+        if not hasattr(config, 'use_universal_attn'):
+            config.use_universal_attn = args.use_universal_attn
     else:
         print("Initializing new Universal Transformer model from scratch...", flush=True)
         config = GPTConfig(
@@ -96,7 +99,8 @@ def main():
             n_coord=args.n_coord, 
             n_coord_heads=4 if args.n_coord > 0 else 0,
             freeze_coord_scale=False,
-            tie_weights=False
+            tie_weights=False,
+            use_universal_attn=args.use_universal_attn
         )
         
     if config.counter_inject_layers is None and config.n_counter > 0:
@@ -137,6 +141,8 @@ def main():
         run_name += "_warmstart"
     if config.tie_weights is False:
         run_name += "_no_tie"
+    if getattr(config, 'use_universal_attn', False):
+        run_name += "_uni_attn"
         
     wandb.init(
         project=args.wandb_project,
