@@ -85,6 +85,9 @@ def run_lesson_validation(model, tokenizer, data_path, lesson, device, num_sampl
         prompt = parts[0] + curr_delimiter
         target = line[len(prompt):].strip() # Everything after delimiter
         
+        target_tokens = tokenizer.encode(target)
+        curr_max_gen = min(curr_max_gen, len(target_tokens) + 5)
+        
         prompt_tokens = tokenizer.encode(prompt)
         prompt_tensor = torch.tensor([prompt_tokens], dtype=torch.long, device=device)
         
@@ -130,10 +133,14 @@ def run_lesson_validation(model, tokenizer, data_path, lesson, device, num_sampl
 
         if idx_sample > 0 and (idx_sample+1) % (total//10) == 0:
             accuracy = (correct / (idx_sample+1)) * 100
-            print(f"Lesson {lesson} Progress: {int((idx_sample+1) / total * 100)}% ({idx_sample+1}/{total} samples) Correct {correct}/{idx_sample+1} -> Accuracy: {accuracy:.2f}%", flush=True)
+            import datetime
+            ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            print(f"[{ts}] Lesson {lesson} Progress: {int((idx_sample+1) / total * 100)}% ({idx_sample+1}/{total} samples) Correct {correct}/{idx_sample+1} -> Accuracy: {accuracy:.2f}%", flush=True)
 
     accuracy = (correct / total) * 100 if total > 0 else 0.0
-    print(f"Lesson {lesson} Validation: Correct {correct}/{total} -> Accuracy: {accuracy:.2f}%", flush=True)
+    import datetime
+    ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    print(f"[{ts}] Lesson {lesson} Validation: Correct {correct}/{total} -> Accuracy: {accuracy:.2f}%", flush=True)
     return accuracy
 
 if __name__ == "__main__":

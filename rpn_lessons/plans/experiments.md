@@ -6,5 +6,5 @@
 * **Base Experiment WanDB link**: https://wandb.ai/sjamthe/rpn-curriculum/runs/9mjr49np/overview?nw=nwusersjamthe
 
 **Training Commands:**
-run uv train.py --lesson 1 --run_name_suffix wrappedNum  --use_universal_attn
+uv run python rpn_lessons/train.py --lesson 1 --run_name_suffix wrappedNum  --use_universal_attn
 
