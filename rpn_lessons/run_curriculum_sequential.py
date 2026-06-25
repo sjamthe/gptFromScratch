@@ -37,7 +37,7 @@ def main():
     cmd_l1 = [
         "python", "rpn_lessons/train.py",
         "--lesson", "1",
-        "--run_name_suffix", "wrappedNum"
+        "--run_name_suffix", "wrappedNumUA_3Layers", "--use_universal_attn"
     ]
     run_command(cmd_l1, cwd=project_root)
 
@@ -46,8 +46,8 @@ def main():
     cmd_l2 = [
         "python", "rpn_lessons/train.py",
         "--lesson", "2",
-        "--checkpoint", "rpn_lessons/models/lesson1_wrappedNum_step20000.pt",
-        "--run_name_suffix", "wrappedNum"
+        "--checkpoint", "rpn_lessons/models/lesson1_wrappedNumUA_3Layers_step40000.pt",
+        "--run_name_suffix", "wrappedNumUA_3Layers", "--use_universal_attn"
     ]
     run_command(cmd_l2, cwd=project_root)
     
@@ -56,8 +56,8 @@ def main():
     cmd_l3 = [
         "python", "rpn_lessons/train.py",
         "--lesson", "3",
-        "--checkpoint", "rpn_lessons/models/lesson2_wrappedNum_step40000.pt",
-        "--run_name_suffix", "wrappedNum"
+        "--checkpoint", "rpn_lessons/models/lesson2_wrappedNumUA_3Layers_step40000.pt",
+        "--run_name_suffix", "wrappedNumUA_3Layers", "--use_universal_attn"
     ]
     run_command(cmd_l3, cwd=project_root)
     
@@ -66,8 +66,8 @@ def main():
     cmd_l4 = [
         "python", "rpn_lessons/train.py",
         "--lesson", "4",
-        "--checkpoint", "rpn_lessons/models/lesson3_wrappedNum_step80000.pt",
-        "--run_name_suffix", "wrappedNum"
+        "--checkpoint", "rpn_lessons/models/lesson3_wrappedNumUA_3Layers_step80000.pt",
+        "--run_name_suffix", "wrappedNumUA_3Layers", "--use_universal_attn"
     ]
     run_command(cmd_l4, cwd=project_root)
     
@@ -75,7 +75,7 @@ def main():
     # Evaluate the resulting lesson 4 model
     cmd_eval = [
         "python", "rpn_lessons/run_ood_evaluation.py",
-        "--checkpoint", "rpn_lessons/models/lesson4_wrappedNum_step40000.pt",
+        "--checkpoint", "rpn_lessons/models/lesson4_wrappedNumUA_3Layers_step40000.pt",
         "--device", "cpu"
     ]
     run_command(cmd_eval, cwd=project_root)

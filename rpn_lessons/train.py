@@ -85,7 +85,7 @@ def main():
         print("Initializing new Universal Transformer model from scratch...", flush=True)
         config = GPTConfig(
             vocab_size=64, 
-            n_layer=2, 
+            n_layer=3, 
             n_head=8, 
             n_embd=384, 
             block_size=T, 
